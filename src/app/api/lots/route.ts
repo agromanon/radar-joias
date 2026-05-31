@@ -147,34 +147,19 @@ export async function GET(request: NextRequest) {
     }
 
     // Get bid periods for the lot's city (include all recent, not just active)
-    const cityIds = [...new Set((lots as any)?.map((l: any) => l.city_id).filter(Boolean) || [])];
-    let bidPeriodsByCity: Record<number, {start_date: string, end_date: string}> = {};
-    if (cityIds.length > 0) {
-      // Get all bid periods for these cities, sorted by end_date descending (most recent first)
-      const { data: periods } = await svc
-        .from("bid_periods")
-        .select("city_id, start_date, end_date, is_active")
-        .in("city_id", cityIds)
-        .order("end_date", { ascending: false });
-      if (periods) {
-        // Use the most recent period for each city
-        const seen = new Set<number>();
-        for (const p of periods) {
-          if (!seen.has(p.city_id)) {
-            seen.add(p.city_id);
-            bidPeriodsByCity[p.city_id] = { start_date: p.start_date, end_date: p.end_date };
-          }
-        }
-      }
-    }
-
-    // Extract source_url and add bid_end info to each lot
-    let lotsWithSourceUrl = (lots as any)?.map((lot: any) => ({
-      ...lot,
-      source_url: lot.metadata?.source_url || lot.source_url,
-      bid_end: bidPeriodsByCity[lot.city_id]?.end_date || null,
-      bid_start: bidPeriodsByCity[lot.city_id]?.start_date || null,
-    })) || [];
+    // For leiloes/vendas, use auction's bid_start_date/bid_end_date directly when available
+    let lotsWithSourceUrl = (lots as any)?.map((lot: any) => {
+      const auction = lot.auctions;
+      // Prefer auction's own bid dates (more accurate than city-wide bid_periods)
+      const bid_end = auction?.bid_end_date || null;
+      const bid_start = auction?.bid_start_date || null;
+      return {
+        ...lot,
+        source_url: lot.metadata?.source_url || lot.source_url,
+        bid_end,
+        bid_start,
+      };
+    });
 
     // Sort by bid_end if requested (most urgent first)
     // Past bid_end (auction ended, awaiting results) goes to bottom; future dates sort normally
