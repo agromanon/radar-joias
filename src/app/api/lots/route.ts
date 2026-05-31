@@ -41,9 +41,10 @@ export async function GET(request: NextRequest) {
     const order = searchParams.get("order") || "desc";
     const leiloes = searchParams.get("leiloes") === "true";
     const vendas = searchParams.get("vendas") === "true";
+    const idParam = searchParams.get("id");
 
-    // Build query
-    const selectCols = leiloes || vendas
+    // Build query — always include auctions for single-lot fetches
+    const selectCols = leiloes || vendas || idParam
       ? "*, auctions(auction_code, bid_end_date, result_date, status, centralizer_unit, bid_start_date)"
       : "*";
     let query = svc
@@ -111,7 +112,6 @@ export async function GET(request: NextRequest) {
     }
 
     // Fetch by specific lot ID (used by lot detail page)
-    const idParam = searchParams.get("id");
     if (idParam) {
       query = query.eq("id", parseInt(idParam));
     }
