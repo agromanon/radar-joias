@@ -1,4 +1,5 @@
 # ---- Dependencies stage ----
+# v2 — force rebuild
 FROM node:20-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
@@ -16,7 +17,7 @@ ENV SUPABASE_URL=${SUPABASE_URL:-https://placeholder.supabase.co}
 ENV SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-placeholder}
 ENV LLM_API_KEY=${LLM_API_KEY:-placeholder}
 
-ENV NODE_OPTIONS="--max-old-space-size=1536"
+ENV NODE_OPTIONS="--max-old-space-size=2048"
 
 RUN npm run build
 
