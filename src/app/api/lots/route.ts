@@ -250,15 +250,15 @@ export async function GET(request: NextRequest) {
     // Sort by bid_end if requested (most urgent first)
     // Past bid_end (auction ended, awaiting results) goes to bottom; future dates sort normally
     if (isBidEndSort) {
-      const now = Date.now();
+      const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD in UTC, timezone-neutral enough
       lotsWithSourceUrl.sort((a: any, b: any) => {
-        const aEnd = a.bid_end ? new Date(a.bid_end).getTime() : Infinity;
-        const bEnd = b.bid_end ? new Date(b.bid_end).getTime() : Infinity;
-        const aPast = aEnd < now;
-        const bPast = bEnd < now;
+        const aEnd = a.bid_end || "9999-12-31";
+        const bEnd = b.bid_end || "9999-12-31";
+        const aPast = aEnd < today;
+        const bPast = bEnd < today;
         if (aPast && !bPast) return 1;   // past → push down
         if (!aPast && bPast) return -1; // future → bring forward
-        return aEnd - bEnd;              // both same status → sort ascending
+        return aEnd.localeCompare(bEnd);  // both same status → sort ascending
       });
       // Apply pagination after sorting
       const fromIdx = (page - 1) * limit;
