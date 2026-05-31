@@ -1,9 +1,5 @@
 # ---- Dependencies stage ----
 FROM node:20-slim AS deps
-RUN apt-get update && apt-get install -y --no-install-recommends \
-  libc6-compat \
-  && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci
@@ -28,12 +24,8 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-  ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
-
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 nextjs
 
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
