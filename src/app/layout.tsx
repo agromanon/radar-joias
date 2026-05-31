@@ -11,8 +11,8 @@
 	});
 
 	export const metadata: Metadata = {
-	  title: "Radar Leilão | Oportunidades Industriais",
-	  description: "O maior agregador de leilões com inteligência artificial.",
+	  title: "Radar Jóias | Oportunidades Industriais",
+	  description: "O maior agregador de auctions de joias com inteligência artificial.",
 	  manifest: "/manifest.json",
 	};
 

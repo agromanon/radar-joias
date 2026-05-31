@@ -7,7 +7,7 @@ export default function AdminSettingsPage() {
       <div className="flex flex-col md:flex-row items-center justify-between gap-6 mb-12">
         <div className="text-center md:text-left">
            <h1 className="text-3xl md:text-5xl font-black text-white tracking-tighter mb-2">Configurações Base</h1>
-           <p className="text-[#8E9297] font-medium font-sans">Gerencie o comportamento global do ecossistema Radar Leilão.</p>
+           <p className="text-[#8E9297] font-medium font-sans">Gerencie o comportamento global do ecossistema Radar Jóias.</p>
         </div>
         <button className="bg-[#EF4444] hover:bg-[#D32F2F] text-white px-8 py-4 rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-[#EF4444]/20 transition-all flex items-center gap-2">
            <Save className="w-4 h-4" /> Salvar Alterações
@@ -24,7 +24,7 @@ export default function AdminSettingsPage() {
            <div className="space-y-6">
               <div>
                  <label className="text-[10px] font-black text-[#454655] uppercase tracking-widest mb-2 block">Título Meta do SaaS</label>
-                 <input type="text" defaultValue="Radar Leilão | Inteligência B2B" className="w-full bg-[#0B0E14] border border-[#272A31] rounded-2xl p-4 text-sm text-white focus:outline-none focus:border-[#EF4444] transition-colors" />
+                 <input type="text" defaultValue="Radar Jóias | Inteligência B2B" className="w-full bg-[#0B0E14] border border-[#272A31] rounded-2xl p-4 text-sm text-white focus:outline-none focus:border-[#EF4444] transition-colors" />
               </div>
               <div>
                  <label className="text-[10px] font-black text-[#454655] uppercase tracking-widest mb-2 block">Descrição Principal</label>
