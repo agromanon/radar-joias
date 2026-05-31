@@ -1,0 +1,1608 @@
+#!/usr/bin/env node
+/**
+ * Vitrine de Joias Scraper
+ * ========================
+ * Usage:
+ *   node scraper.js --mode=states-cities
+ *   node scraper.js --mode=bid-periods
+ *   node scraper.js --mode=active-lots
+ *   node scraper.js --mode=results
+ *   node scraper.js --mode=edital --auction-code="119/2026"
+ *
+ * Environment variables required in .env:
+ *   SUPABASE_URL=https://your-project.supabase.co
+ *   SUPABASE_SERVICE_KEY=your-service-role-key
+ *   LLM_API_KEY=your-anthropic-or-openai-key
+ *   LLM_PROVIDER=anthropic|openai  (default: anthropic)
+ */
+
+import { createClient } from '@supabase/supabase-js';
+import { config } from 'dotenv';
+import { proxiedFetch } from './http-proxy-utils.js';
+import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { llmCall } from './llm-gateway.js';
+
+// Load .env
+config();
+
+// ============================================================
+// CONFIG
+// ============================================================
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+const LLM_API_KEY = process.env.LLM_API_KEY;
+const LLM_PROVIDER = process.env.LLM_PROVIDER ?? 'anthropic';
+
+const API_BASE = 'https://servicebus2.caixa.gov.br/vitrinedejoias/api';
+
+const STANDARD_HEADERS = {
+  accept: 'application/json, text/plain, */*',
+  'accept-language': 'pt-BR,pt;q=0.9,en;q=0.8',
+  origin: 'https://vitrinedejoias.caixa.gov.br',
+  referer: 'https://vitrinedejoias.caixa.gov.br/',
+  'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+  'sec-fetch-mode': 'cors',
+  'sec-fetch-site': 'same-site',
+};
+
+const BATCH_SIZE = 81; // API max items per page
+
+// ============================================================
+// INIT
+// ============================================================
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+  console.error('ERROR: SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in .env');
+  process.exit(1);
+}
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+  auth: { persistSession: false }
+});
+
+// ============================================================
+// FETCH HELPERS
+// ============================================================
+
+async function apiFetch(endpoint, params = {}) {
+  const url = new URL(`${API_BASE}${endpoint}`);
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v);
+  });
+
+  let attempt = 0;
+  while (attempt < 3) {
+    const res = await proxiedFetch(url.toString(), { headers: STANDARD_HEADERS });
+    if (res.status === 429) {
+      attempt++;
+      const wait = attempt * 60_000;
+      console.warn(`  Rate limited, waiting ${wait}ms...`);
+      await sleep(wait);
+      continue;
+    }
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`API ${res.status} for ${url}: ${body.slice(0, 200)}`);
+    }
+    return res.json();
+  }
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ============================================================
+// PARSE HELPERS
+// ============================================================
+
+function parseMoney(str) {
+  if (!str) return null;
+  // "R$ 1.854,00" → 1854.00
+  const cleaned = str.replace(/[R$\.\s]/g, '').replace(',', '.');
+  return parseFloat(cleaned) || null;
+}
+
+function mapOutcomeStatus(situacao) {
+  const map = {
+    'Venda Direta': 'VENDIDO',
+    '2ª Venda Direta': 'VENDIDO',
+    'Encerrado': 'NÃO VENDIDO',
+    'Suspenso': 'CANCELADO',
+    'Lote Devolvido': 'DEVOLVIDO',
+  };
+  return map[situacao] ?? situacao;
+}
+
+function extractCategory(deContrato) {
+  const text = (deContrato || '').toUpperCase();
+  if (text.includes('RELOGIO') || text.includes('RELÓGIO')) return 'watch';
+  if (text.includes('MOEDA') || text.includes('MOEDAS')) return 'coin';
+  if (text.includes('COLAR') || text.includes('PULSEIRA') || text.includes('ANEL') ||
+      text.includes('BRINCO') || text.includes('PENDENTE') || text.includes('ALIANÇA') ||
+      text.includes('TERÇO') || text.includes('CORRENTE') || text.includes('BROCHE')) return 'jewelry';
+  return 'other';
+}
+
+function extractKarat(deContrato) {
+  const text = (deContrato || '').toUpperCase();
+  const karatMap = {
+    'OURO 1,0': '24k', 'OURO 1,00': '24k',
+    'OURO 0,750': '18k', 'OURO 0,75': '18k', 'OURO 18K': '18k', 'OURO 18K': '18k',
+    'OURO 0,600': '14k', 'OURO 0,60': '14k', 'OURO 14K': '14k',
+    'OURO 0,500': '12k', 'OURO 12K': '12k',
+    'OURO 0,400': '10k', 'OURO 10K': '10k',
+    'OURO BAIXO': '10k', 'OURO BAIXO,': '10k',
+    'OURO BRANCO': null, // alloy, not a karat
+    'PRATA 925': 'silver', 'PRATA': 'silver',
+    'PALÁDIO': 'palladium', 'METAL NÃO NOBRE': 'base_metal',
+  };
+  for (const [keyword, karat] of Object.entries(karatMap)) {
+    if (text.includes(keyword)) return karat;
+  }
+  return null;
+}
+
+// ============================================================
+// PDF PARSING (Results PDF - plain text table)
+// ============================================================
+
+// Extract text from PDF buffer using pdfjs-dist
+async function extractPdfText(pdfBuffer) {
+  const data = new Uint8Array(pdfBuffer);
+  const loadingTask = getDocument({
+    data,
+    useWorkerFetch: false,
+    isEvalSupported: false,
+    useSystemFonts: true
+  });
+  const pdf = await loadingTask.promise;
+  let fullText = '';
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    const pageText = content.items.map(item => item.str).join(' ');
+    fullText += pageText + '\n';
+  }
+  return fullText;
+}
+
+// Parse results PDF - extract lot numbers, winning bids, and buyer CPFs
+// Handles two formats:
+// 1. Results PDF (Relatório de Resultados por CPF/CNPJ): lot_number | value | tariff | total per buyer group
+//    Example: "0061.000233-3   500,00   30,00   530,00"
+// 2. Original local format: same pattern
+function parseResultsPdfText(text, auctionCode) {
+  const lots = [];
+
+  // Pattern 1: standard table format (works for both formats)
+  // lot_number followed by 3 values (lance, tarifa, total)
+  // Example: "0061.000309-7   1.600,00   96,00   1.696,00"
+  const lotPattern = /(\d{4}\.\d{6}-\d)\s+([\d\.]+,\d{2})\s+([\d\.]+,\d{2})\s+([\d\.]+,\d{2})/g;
+
+  let match;
+  const seenLots = new Set();
+  while ((match = lotPattern.exec(text)) !== null) {
+    const lot_number = match[1];
+    // Avoid duplicates if same lot appears multiple times in PDF
+    if (seenLots.has(lot_number)) continue;
+    seenLots.add(lot_number);
+
+    const lance = parseBrMoney(match[2]);
+    const tarifa = parseBrMoney(match[3]);
+    const total = parseBrMoney(match[4]);
+    lots.push({
+      lot_number,
+      lance,
+      tarifa,
+      winning_bid: total,
+      status: 'VENDIDO'
+    });
+  }
+
+  return { auction_code: auctionCode, lots };
+}
+
+// Parse Brazilian money string "1.600,00" to number 1600.00
+function parseBrMoney(str) {
+  if (!str) return null;
+  // Remove dots (thousands separator) and replace comma with decimal point
+  const cleaned = str.replace(/\./g, '').replace(',', '.');
+  return parseFloat(cleaned) || null;
+}
+
+function parseDate(str) {
+  if (!str) return null;
+  // DD/MM/YYYY → YYYY-MM-DD
+  const m = str.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+  if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+  return null;
+}
+
+function parseDeadlineDays(str) {
+  if (!str) return null;
+  // Extract first DD/MM/YYYY and return just the day count (difference from result date)
+  // Or extract pure integer if it's just a number
+  const intMatch = String(str).match(/^(\d+)$/);
+  if (intMatch) return parseInt(intMatch[1]);
+  // For date ranges like "18/06/2026 a 22/06/2026", extract first date
+  const m = String(str).match(/(\d{2})\/(\d{2})\/(\d{4})/);
+  if (m) {
+    const start = new Date(`${m[3]}-${m[2]}-${m[1]}`);
+    const end = new Date(`${m[3]}-${m[2]}-${m[1]}`);
+    // For pickup deadline, just return the day from the first date
+    return parseInt(m[1]);
+  }
+  return null;
+}
+
+// ============================================================
+// DB UPSERTS
+// ============================================================
+
+async function upsertStates(statesList) {
+  const rows = statesList.map(s => ({ uf: s.sigla ?? s.uf ?? s.sgUf, has_auctions: true }));
+  const { error } = await supabase
+    .from('states')
+    .upsert(rows, { onConflict: 'uf', ignoreDuplicates: false });
+  if (error) throw error;
+  console.log(`  States upserted: ${rows.length}`);
+}
+
+async function getStateId(uf) {
+  const { data } = await supabase.from('states').select('id').eq('uf', uf).single();
+  return data?.id;
+}
+
+async function upsertCities(citiesList, stateId) {
+  const rows = citiesList.map(c => ({
+    state_id: stateId,
+    name: c.nome ?? c.noCidade ?? c.nome,
+    caixa_city_code: c.codigo ?? c.codigoCidade ?? c.coCidade,
+  }));
+  const { error } = await supabase
+    .from('cities')
+    .upsert(rows, { onConflict: 'caixa_city_code', ignoreDuplicates: false });
+  if (error) throw error;
+  console.log(`  Cities upserted: ${rows.length}`);
+}
+
+async function getAllCities() {
+  const { data } = await supabase.from('cities').select('id, name, caixa_city_code, state_id').order('id');
+  return data ?? [];
+}
+
+async function upsertBidPeriods(cityId, periods) {
+  const today = new Date().toISOString().split('T')[0];
+  const rows = periods.filter(p => p.inicioLance || p.dataInicio).map(p => ({
+    city_id: cityId,
+    start_date: p.inicioLance ?? p.dataInicio,
+    end_date: p.fimLance ?? p.dataFim,
+    is_active: (p.fimLance ?? p.dataFim) >= today,
+  }));
+  const { error } = await supabase
+    .from('bid_periods')
+    .upsert(rows, { onConflict: 'city_id,start_date', ignoreDuplicates: false });
+  if (error) throw error;
+  console.log(`  Bid periods upserted: ${rows.length}`);
+}
+
+async function getActiveBidPeriods() {
+  // Fetch ALL periods (past and future) — results mode needs historical data too
+  const { data } = await supabase
+    .from('bid_periods')
+    .select('id, city_id, start_date, end_date')
+    .order('end_date', { ascending: false });
+  return data ?? [];
+}
+
+async function getCityByCode(code) {
+  const { data } = await supabase.from('cities').select('id, name').eq('caixa_city_code', code).single();
+  return data;
+}
+
+// ============================================================
+// MODE: STATES-CITIES
+// ============================================================
+
+async function modeStatesCities() {
+  console.log('\n=== Mode: states-cities ===');
+  const start = Date.now();
+
+  // Step 1: States
+  console.log('Fetching states...');
+  const statesData = await apiFetch('/busca/ufs');
+  const statesList = Array.isArray(statesData) ? statesData : (statesData.ufs ?? []);
+  await upsertStates(statesList);
+
+  // Step 2: Cities per state
+  const states = await supabase.from('states').select('id, uf');
+  for (const state of states.data ?? []) {
+    console.log(`Fetching cities for ${state.uf}...`);
+    await sleep(500); // be nice to the API
+    const citiesData = await apiFetch(`/busca/cidades/${state.uf}`);
+    const citiesList = Array.isArray(citiesData) ? citiesData : (citiesData?.cidades ?? []);
+    await upsertCities(citiesList, state.id);
+  }
+
+  const ms = Date.now() - start;
+  console.log(`Done in ${ms}ms`);
+}
+
+// ============================================================
+// MODE: BID-PERIODS
+// ============================================================
+
+async function modeBidPeriods() {
+  console.log('\n=== Mode: bid-periods ===');
+  const start = Date.now();
+  const cities = await getAllCities();
+
+  for (const city of cities) {
+    await sleep(300);
+    try {
+      const data = await apiFetch(`/busca/periodos/${city.caixa_city_code}`);
+      const periods = Array.isArray(data) ? data : (data?.periodos ?? []);
+      await upsertBidPeriods(city.id, periods);
+    } catch (e) {
+      console.error(`  Error for city ${city.caixa_city_code}: ${e.message}`);
+    }
+  }
+
+  const ms = Date.now() - start;
+  console.log(`Done in ${ms}ms`);
+}
+
+// ============================================================
+// MODE: ACTIVE-LOTS
+// ============================================================
+
+async function scrapeLotsPage(cityCode, startDate, endDate, page) {
+  return apiFetch('/busca/vitrine', {
+    codigoDaCidade: cityCode,
+    dataInicioLance: startDate,
+    dataFimLance: endDate,
+    pagina: page,
+    quantidadeDeItens: BATCH_SIZE,
+    valorMinimoVenda: 0,
+    valorMaximoVenda: 0,
+    numeroDoLoteOuContrato: '',
+    campoDeOrdenacao: '',
+    ordenacao: '',
+  });
+}
+
+async function upsertLot(cityId, lot) {
+  // Extract file IDs
+  const arquivos = lot.arquivosPublicados ?? [];
+  const editalFile = arquivos.find(a => a.tipoArquivo === 'Edital');
+  const catalogoFile = arquivos.find(a => a.tipoArquivo === 'Catálogo Atualizado')
+    ?? arquivos.find(a => a.tipoArquivo === 'Catálogo');
+
+  // Image URLs
+  const baseImg = 'https://servicebus2.caixa.gov.br/vitrinedejoias';
+
+  const row = {
+    city_id: cityId,
+    lot_number: lot.numeroDolote,
+    contract_number: lot.nuContrato,
+    co_leilao: lot.coLeilao,
+    de_contrato: lot.deContrato,
+    valor: parseMoney(lot.valor),
+    sg_uf: lot.sgUf,
+    pickup_location: lot.deLocalEndereco,
+    url_imagem_capa: lot.urlImagemCapa ? `${baseImg}${lot.urlImagemCapa}` : null,
+    url_imagem_frente: lot.urlImagemFrente ? `${baseImg}${lot.urlImagemFrente}` : null,
+    url_imagem_verso: lot.urlImagemVerso ? `${baseImg}${lot.urlImagemVerso}` : null,
+    centralizer_code: lot.nuUnidade,
+    centralizer_name: lot.noCentralizadora,
+    api_id: lot.id,
+    edital_id: editalFile?.nome ?? null,
+    catalogo_id: catalogoFile?.nome ?? null,
+    category: extractCategory(lot.deContrato),
+    karat: extractKarat(lot.deContrato),
+    last_seen_at: new Date().toISOString(),
+    first_seen_at: new Date().toISOString(), // will not overwrite if exists due to upsert
+  };
+
+  const { error } = await supabase
+    .from('lots')
+    .upsert(row, { onConflict: 'city_id,lot_number', ignoreDuplicates: false });
+
+  if (error) {
+    console.error(`  Lot upsert error: ${error.message}`);
+    return false;
+  }
+  return true;
+}
+
+async function modeActiveLots() {
+  console.log('\n=== Mode: active-lots ===');
+  const start = Date.now();
+  const periods = await getActiveBidPeriods();
+  const cities = await getAllCities();
+  const cityMap = Object.fromEntries(cities.map(c => [c.id, c]));
+
+  let totalNew = 0, totalUpdated = 0, totalErrors = 0;
+
+  for (const period of periods) {
+    const city = cityMap[period.city_id];
+    if (!city) continue;
+
+    console.log(`\n  City: ${city.name} (${city.caixa_city_code}), Period: ${period.start_date} → ${period.end_date}`);
+    await sleep(300);
+
+    let page = 1, totalItems = null, totalPages = null;
+
+    while (true) {
+      try {
+        const data = await scrapeLotsPage(city.caixa_city_code, period.start_date, period.end_date, page);
+        const lotes = Array.isArray(data?.lotes) ? data.lotes : [];
+        const resTotal = data?.totalDeItens ?? data?.totalDeItensCatalogados ?? null;
+        const resPages = data?.totalDePaginas ?? data?.quantidadeDePaginas ?? null;
+        if (totalItems === null) {
+          const rawPages = data.paginas ?? data.totalDePaginas;
+          // paginas can be [1,2,3,4,5,6] (an array) or a number or a string "1,2,3,4,5,6"
+          if (Array.isArray(rawPages)) {
+            totalPages = rawPages.length;
+          } else if (typeof rawPages === 'string' && rawPages.includes(',')) {
+            totalPages = rawPages.split(',').length;
+          } else {
+            totalPages = parseInt(rawPages) || Math.ceil((data.totalRegistros ?? data.totalDeItens ?? lotes.length) / BATCH_SIZE);
+          }
+          totalItems = data.totalRegistros ?? data.totalDeItens ?? lotes.length;
+          console.log(`    Total items: ${totalItems}, pages: ${totalPages}`);
+        }
+
+        if (lotes.length === 0) break;
+
+        for (const lot of lotes) {
+          const ok = await upsertLot(city.id, lot);
+          if (ok) totalNew++;
+          else totalErrors++;
+        }
+
+        totalUpdated += lotes.length;
+
+        if (page >= totalPages || totalPages === 0) break;
+        page++;
+        await sleep(200);
+      } catch (e) {
+        console.error(`    Page error: ${e.message}`);
+        totalErrors++;
+        break;
+      }
+    }
+  }
+
+  const ms = Date.now() - start;
+  console.log(`\nDone in ${ms}ms | new: ${totalNew}, updated: ${totalUpdated}, errors: ${totalErrors}`);
+}
+
+// ============================================================
+// LLM PROVIDER CLIENT (from DB)
+// ============================================================
+
+let llmProviders = null;
+
+async function loadLLMProviders() {
+  if (llmProviders) return llmProviders;
+  const { data } = await supabase
+    .from('llm_providers')
+    .select('*')
+    .eq('is_active', true)
+    .order('priority', { ascending: true });
+  llmProviders = data ?? [];
+  return llmProviders;
+}
+
+async function callLLMProvider(prompt, base64Pdf = null) {
+  const providers = await loadLLMProviders();
+  if (!providers.length) throw new Error('No active LLM providers configured');
+
+  let lastError = new Error();
+  for (const provider of providers) {
+    try {
+      const p = provider;
+      if (p.provider_type === 'openai_compatible') {
+        // Works for MiniMax and OpenAI-compatible endpoints
+        const baseUrl = p.base_url || 'https://api.minimax.io/v1';
+        const messages = base64Pdf
+          ? [
+              { role: 'user', content: [
+                  { type: 'text', text: prompt },
+                  { type: 'image_url', image_url: { url: `data:application/pdf;base64,${base64Pdf}` }}
+                ]}
+            ]
+          : [{ role: 'user', content: prompt }];
+
+        const response = await fetch(`${baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${p.api_key}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: p.model, messages, max_tokens: p.max_tokens || 4096, temperature: p.temperature || 0.7 })
+        });
+        if (!response.ok) throw new Error(`LLM API error ${response.status}: ${await response.text()}`);
+        const data = await response.json();
+        return data.choices?.[0]?.message?.content || '';
+      } else {
+        // Anthropic (using image_url for MiniMax compatibility)
+        const baseUrl = p.base_url || 'https://api.anthropic.com';
+        const messages = base64Pdf
+          ? [
+              { role: 'user', content: [
+                  { type: 'image_url', image_url: { url: `data:application/pdf;base64,${base64Pdf}` }},
+                  { type: 'text', text: prompt }
+                ]}
+            ]
+          : [{ role: 'user', content: prompt }];
+        const response = await fetch(`${baseUrl}/v1/messages`, {
+          method: 'POST',
+          headers: { 'x-api-key': p.api_key, 'content-type': 'application/json', 'anthropic-version': '2023-06-01' },
+          body: JSON.stringify({ model: p.model, max_tokens: p.max_tokens || 4096, messages })
+        });
+        if (!response.ok) throw new Error(`Anthropic API error ${response.status}: ${await response.text()}`);
+        const data = await response.json();
+        // Handle MiniMax thinking blocks — find the text block
+        const textBlock = data.content?.find(c => c.type === 'text');
+        return textBlock?.text || '';
+      }
+    } catch (e) {
+      lastError = e;
+      if (!provider.is_fallback) break; // non-fallback: fail fast
+    }
+  }
+  throw lastError;
+}
+
+// ============================================================
+// MODE: RESULTS
+// ============================================================
+
+async function modeResults() {
+  console.log('\n=== Mode: results ===');
+  const start = Date.now();
+
+  let totalUpdated = 0, totalErrors = 0;
+
+  try {
+    // Fetch results per-city using the per-city endpoint (codigoDaCidade)
+    const cities = await getAllCities();
+
+    for (const city of cities) {
+      await sleep(300);
+      try {
+        // Per-city results API
+        const data = await apiFetch('/busca/resultados-leiloes', {
+          codigoDaCidade: city.caixa_city_code,
+          dataFimLance: '',
+          dataInicioLance: '',
+          numeroDoLoteOuContrato: '',
+        });
+
+        const rows = Array.isArray(data) ? data : (data?.resultados ?? data?.items ?? []);
+
+        if (!rows.length) continue;
+        console.log(`  ${city.name} (${city.caixa_city_code}): ${rows.length} completed auction(s)`);
+
+        for (const row of rows) {
+          const coLeilao = row.coLeilao;
+          const arquivos = row.arquivosPublicados ?? [];
+          const relatorioFile = arquivos.find(a => a.tipoArquivo === 'Relatório de Resultados por CPF/CNPJ');
+          const catAtualizadoFile = arquivos.find(a => a.tipoArquivo === 'Catálogo Atualizado');
+
+          // Find all lots for this auction
+          const { data: matchedLots } = await supabase
+            .from('lots')
+            .select('id, co_leilao, outcome_status, auction_id')
+            .eq('co_leilao', coLeilao);
+
+          if (!matchedLots?.length) {
+            console.log(`    ${coLeilao}: no lots in DB`);
+            continue;
+          }
+
+          const matchedLot = matchedLots[0];
+          const outcomeStatus = mapOutcomeStatus(row.situacao);
+          const winningBid = parseMoney(row.valorVenda);
+
+          // Try PDF parsing if available (but handle 404 gracefully)
+          let pdfExtracted = false;
+          if (relatorioFile || catAtualizadoFile) {
+            const fileToTry = relatorioFile || catAtualizadoFile;
+            try {
+              const pdfBuffer = await downloadPdf(fileToTry.nome, fileToTry.tipoArquivo);
+              const text = await extractPdfText(pdfBuffer);
+              const extracted = parseResultsPdfText(text, coLeilao);
+
+              if (extracted.lots && Array.isArray(extracted.lots) && extracted.lots.length > 0) {
+                for (const lotResult of extracted.lots) {
+                  const { error } = await supabase
+                    .from('lots')
+                    .update({
+                      outcome_status: 'VENDIDO',
+                      winning_bid_value: lotResult.winning_bid,
+                      tarifa_arrematacao: lotResult.tarifa,
+                      valor_venda: lotResult.winning_bid,
+                      was_sold: true,
+                      outcome_scrape_date: new Date().toISOString(),
+                    })
+                    .eq('co_leilao', coLeilao)
+                    .eq('lot_number', lotResult.lot_number || lotResult.numeroDolote);
+                  if (!error) totalUpdated++;
+                }
+                // Update auction record
+                if (matchedLot.auction_id) {
+                  await supabase.from('auctions').update({
+                    has_catalogo_atualizado: !!catAtualizadoFile,
+                    catalogo_atualizado_url: catAtualizadoFile?.nome,
+                    result_date: row.dtFim ? row.dtFim.split('/').reverse().join('-') : null,
+                  }).eq('id', matchedLot.auction_id);
+                }
+                pdfExtracted = true;
+                console.log(`    ${coLeilao}: PDF parsed ${extracted.lots.length} lots`);
+              } else {
+                console.log(`    ${coLeilao}: PDF parsed no lots, will use fallback`);
+              }
+            } catch (e) {
+              // PDF 404 = expired/archive unavailable — skip, fall back to basic update
+              if (e.message.includes('404')) {
+                console.log(`    ${coLeilao}: result PDF expired/unavailable`);
+              } else {
+                console.log(`    ${coLeilao}: PDF parsing failed: ${e.message}`);
+              }
+            }
+          }
+
+          // Fallback: update all lots for this auction with basic info from results list
+          if (!pdfExtracted) {
+            for (const lot of matchedLots) {
+              const { error } = await supabase
+                .from('lots')
+                .update({
+                  outcome_status: outcomeStatus,
+                  winning_bid_value: winningBid,
+                  outcome_scrape_date: new Date().toISOString(),
+                })
+                .eq('id', lot.id);
+              if (!error) totalUpdated++;
+            }
+          }
+
+          // Upsert auction record
+          if (matchedLot.auction_id) {
+            await supabase.from('auctions').upsert({
+              id: matchedLot.auction_id,
+              auction_code: coLeilao,
+              co_leilao: coLeilao,
+              result_date: row.dtFim ? row.dtFim.split('/').reverse().join('-') : null,
+              no_unidade: row.noUnidade,
+              has_catalogo_atualizado: !!catAtualizadoFile,
+              catalogo_atualizado_url: catAtualizadoFile?.nome || null,
+            }, { onConflict: 'id', ignoreDuplicates: true });
+          }
+        }
+      } catch (e) {
+        console.error(`  City ${city.name} error: ${e.message}`);
+        totalErrors++;
+      }
+    }
+  } catch (e) {
+    console.error(`  Results API error: ${e.message}`);
+    totalErrors++;
+  }
+
+  const ms = Date.now() - start;
+  console.log(`\nDone in ${ms}ms | updated: ${totalUpdated}, errors: ${totalErrors}`);
+}
+
+async function extractResultsWithLLM(base64, auctionCode) {
+  const prompt = `Você está analisando um Relatório de Resultados de Leilão de Joias da CAIXA.
+Para cada lote no relatório, extraia:
+- numero do lote (lot_number)
+- nome/descrição do item (se disponível)
+- valor de venda (winning_bid) - valor pelo qual foi vendido, ou o lance mais alto
+- status: "VENDIDO" se foi arrematado, "CANCELADO" se cancelado, "NÃO VENDIDO" se não teve lance
+
+Retorne APENAS um JSON válido com este formato, sem texto adicional:
+{
+  "auction_code": "${auctionCode}",
+  "lots": [
+    {"lot_number": "001", "winning_bid": 5000, "status": "VENDIDO"},
+    {"lot_number": "002", "winning_bid": 3500, "status": "VENDIDO"}
+  ]
+}`;
+
+  const text = await callLLMProvider(prompt, base64);
+  try {
+    // Try to extract JSON from the response
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      return JSON.parse(jsonMatch[0]);
+    }
+    return {};
+  } catch {
+    throw new Error(`Failed to parse LLM response: ${text.substring(0, 200)}`);
+  }
+}
+
+// ============================================================
+// MODE: EDITAL (LLM Processing)
+// ============================================================
+
+async function downloadPdf(fileId, fileName) {
+  const nome = encodeURIComponent(fileName || 'Relatório');
+  const url = `${API_BASE}/cronograma/download?documento=${fileId}&nome=${nome}`;
+  const res = await proxiedFetch(url, { headers: { ...STANDARD_HEADERS, 'accept': '*/*', 'referer': 'https://vitrinedejoias.caixa.gov.br/' } });
+  if (!res.ok) throw new Error(`PDF download failed: ${res.status}`);
+  return res.arrayBuffer();
+}
+
+async function extractEditalWithLLM(pdfBuffer, auctionCode) {
+  // Extract plain text from PDF using pdfjs-dist
+  const text = await extractPdfText(pdfBuffer);
+
+  const prompt = `Você é um especialista em extrair informações de editais de leilão de joias da CAIXA.
+Analise o texto do Edital abaixo e extraia os dados em JSON. Responda APENAS com JSON válido, sem texto adicional.
+
+Campos necessários: payment_method, penalty_clause, pickup_deadline_days, payment_deadline_days, centralizer_unit, gilie_code, contact_email, bid_increment_rule, city_name, auction_code, result_date.
+
+Texto do Edital:
+${text.substring(0, 12000)}
+
+Extração JSON:`;
+
+  const result = await llmCall('edital', null, prompt);
+
+  try {
+    // Strip markdown code blocks if present
+    let jsonStr = result.content.trim();
+    // Handle ```json ... ``` or plain JSON
+    const codeBlockMatch = jsonStr.match(/```json\s*([\s\S]*?)\s*```/);
+    if (codeBlockMatch) {
+      jsonStr = codeBlockMatch[1];
+    } else {
+      // Strip any leading text before the first {
+      const firstBrace = jsonStr.indexOf('{');
+      if (firstBrace > 0) jsonStr = jsonStr.substring(firstBrace);
+    }
+    const parsed = JSON.parse(jsonStr);
+    // Flatten: top-level fields OR nested inside .edital
+    const flat = {};
+    const src = parsed.payment_method ? parsed : (parsed.edital ?? parsed);
+    for (const key of ['payment_method','penalty_clause','pickup_deadline_days','payment_deadline_days','centralizer_unit','gilie_code','contact_email','bid_increment_rule','city_name','auction_code','result_date','centralizadora']) {
+      if (src[key] !== undefined) flat[key] = src[key];
+    }
+    return flat;
+  } catch (e) {
+    throw new Error(`Failed to parse LLM response as JSON: ${result.content.substring(0, 200)}`);
+  }
+}
+
+async function modeEdital(auctionCode) {
+  if (!auctionCode) {
+    console.error('ERROR: --auction-code required for edilal mode');
+    process.exit(1);
+  }
+
+  console.log(`\n=== Mode: edilal for ${auctionCode} ===`);
+  const start = Date.now();
+
+  // Find any lot from this auction that has an edilal file
+  const { data: lotsWithEdital } = await supabase
+    .from('lots')
+    .select('edital_id, city_id, co_leilao')
+    .eq('co_leilao', auctionCode)
+    .not('edital_id', 'is', null)
+    .limit(1);
+
+  let edilalId = lotsWithEdital?.[0]?.edital_id;
+
+  // Fallback: fetch edilal_pdf_url directly from auctions table
+  if (!editalId) {
+    const { data: auctionRow } = await supabase
+      .from('auctions')
+      .select('edital_pdf_url, city_id')
+      .eq('auction_code', auctionCode)
+      .single();
+    edilalId = auctionRow?.edital_pdf_url;
+    if (auctionRow?.city_id && !lotsWithEdital?.[0]?.city_id) {
+      // use auction's city_id if lot query returned nothing
+    }
+  }
+
+  if (!editalId) {
+    console.log('No edilal found for this auction. Run active-lots first.');
+    return;
+  }
+  console.log(`Downloading edilal: ${edilalId}`);
+
+  const pdfBuffer = await downloadPdf(edilalId, 'Edital');
+  const extracted = await extractEditalWithLLM(pdfBuffer, auctionCode);
+  console.log('LLM extracted:', JSON.stringify(extracted, null, 2));
+
+  // Map cidade to city_id
+  const cidadeMatch = extracted.city_name ?? extracted.centralizer_unit;
+  let cityId = lotsWithEdital[0].city_id;
+  if (cidadeMatch) {
+    const { data: cityRow } = await supabase
+      .from('cities')
+      .select('id')
+      .ilike('name', `%${cidadeMatch}%`)
+      .single();
+    if (cityRow) cityId = cityRow.id;
+  }
+
+  // Upsert auction and get back the actual ID
+  const { data: auctionRow, error: auctionError } = await supabase
+    .from('auctions')
+    .upsert({
+      auction_code: extracted.auction_code ?? auctionCode,
+      co_leilao: auctionCode,
+      city_id: cityId,
+      result_date: extracted.result_date ? parseDate(extracted.result_date) : null,
+      bid_increment_rule: extracted.bid_increment_rule,
+      payment_method: extracted.payment_method,
+      payment_deadline_days: parseDeadlineDays(extracted.payment_deadline_days),
+      pickup_deadline_days: parseDeadlineDays(extracted.pickup_deadline_days),
+      penalty_clause: extracted.penalty_clause,
+      centralizer_unit: extracted.centralizer_unit,
+      gilie_code: extracted.gilie_code,
+      contact_email: extracted.contact_email,
+      edilal_processed: true,
+      edilal_processed_at: new Date().toISOString(),
+    }, { onConflict: 'auction_code', ignoreDuplicates: false })
+    .select('id')
+    .single();
+
+  if (auctionError) throw auctionError;
+
+  // Link all lots to this auction
+  await supabase
+    .from('lots')
+    .update({ auction_id: auctionRow.id })
+    .eq('co_leilao', auctionCode);
+
+  const ms = Date.now() - start;
+  console.log(`Done in ${ms}ms`);
+}
+
+// ============================================================
+// MODE: DEDUP
+// Removes duplicate lots (same lot_number + co_leilao), keeping the row with most data.
+// Fixes bad co_leilao formats (XXX:2026/undefined → X/2026).
+// Reports orphaned lots (co_leilao not in auctions table).
+// ============================================================
+
+async function modeDedup() {
+  console.log('\n=== Mode: dedup ===');
+  const start = Date.now();
+
+  let fixedCoLeilao = 0;
+  let deletedDupes = 0;
+
+  // 1. Fix bad co_leilao format (XXX:2026/undefined → X/2026)
+  const { data: badFormatLots } = await supabase
+    .from('lots')
+    .select('id, co_leilao')
+    .like('co_leilao', '%:2026%');
+
+  if (badFormatLots?.length) {
+    console.log(`  Found ${badFormatLots.length} rows with bad co_leilao format`);
+    for (const row of badFormatLots) {
+      const match = row.co_leilao.match(/^(\d+):2026\/undefined$/);
+      if (match) {
+        const fixed = `${parseInt(match[1], 10)}/2026`;
+        await supabase.from('lots').update({ co_leilao: fixed }).eq('id', row.id);
+        fixedCoLeilao++;
+      }
+    }
+    console.log(`  Fixed ${fixedCoLeilao} co_leilao values`);
+  }
+
+  // 2. Delete exact duplicates (same lot_number + co_leilao), keeping row with most non-null fields
+  // Use paginated fetch to handle large datasets
+  let page = 0;
+  const PAGE_SIZE = 5000;
+  const allLots = [];
+
+  while (true) {
+    const { data: batch } = await supabase
+      .from('lots')
+      .select('id, lot_number, co_leilao, de_contrato, valor, url_imagem_capa, outcome_status, winning_bid_value, created_at')
+      .order('id')
+      .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
+    if (!batch?.length) break;
+    allLots.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    page++;
+  }
+
+  if (allLots.length) {
+    const groups = new Map();
+    for (const lot of allLots) {
+      const key = `${lot.lot_number}::${lot.co_leilao}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(lot);
+    }
+
+    let dupeGroups = 0;
+    for (const [, rows] of groups) {
+      if (rows.length > 1) {
+        dupeGroups++;
+        const scored = rows.map(r => ({
+          id: r.id,
+          score: [r.de_contrato, r.valor, r.url_imagem_capa, r.outcome_status, r.winning_bid_value]
+            .filter(Boolean).length,
+          created_at: r.created_at,
+        }));
+        scored.sort((a, b) => b.score - a.score || new Date(a.created_at) - new Date(b.created_at));
+        const keepId = scored[0].id;
+        for (const s of scored) {
+          if (s.id !== keepId) {
+            await supabase.from('lots').delete().eq('id', s.id);
+            deletedDupes++;
+          }
+        }
+      }
+    }
+    console.log(`  Found ${dupeGroups} duplicate groups, deleted ${deletedDupes} duplicate rows`);
+  }
+
+  // 3. Fix orphaned lots: create auction records for co_leilao values not in auctions table
+  const { data: auctionCodes } = await supabase.from('auctions').select('auction_code');
+  const validCodes = new Set((auctionCodes || []).map(a => a.auction_code));
+
+  const { data: allOrphanRows } = await supabase
+    .from('lots')
+    .select('id, lot_number, co_leilao')
+    .not('co_leilao', 'is', null);
+
+  const orphans = (allOrphanRows || []).filter(r => !validCodes.has(r.co_leilao));
+  if (orphans.length) {
+    console.log(`  WARNING: ${orphans.length} lots have co_leilao not in auctions table — creating auction stubs`);
+    const orphanCodes = [...new Set(orphans.map(o => o.co_leilao))];
+    let created = 0;
+    for (const code of orphanCodes) {
+      const { data: existing } = await supabase
+        .from('auctions')
+        .select('id')
+        .eq('auction_code', code)
+        .maybeSingle();
+      if (!existing) {
+        await supabase.from('auctions').insert({ auction_code: code, co_leilao: code });
+        created++;
+      }
+    }
+    console.log(`  Created ${created} missing auction records`);
+  } else {
+    console.log(`  All lots linked to valid auctions`);
+  }
+
+  const ms = Date.now() - start;
+  console.log(`\nDone in ${ms}ms | co_leilao fixed: ${fixedCoLeilao}, duplicates deleted: ${deletedDupes}`);
+}
+
+// ============================================================
+// MODE: DISCOVER
+// Discovers all auction codes (completed + future) across all cities.
+// Stores/updates auction records with metadata and file references.
+// ============================================================
+
+async function modeDiscover() {
+  console.log('\n=== Mode: discover ===');
+  const start = Date.now();
+
+  const cities = await getAllCities();
+  console.log(`  Discovering auctions across ${cities.length} cities...`);
+
+  let totalAuctions = 0;
+  let newAuctions = 0;
+
+  for (const city of cities) {
+    await sleep(300);
+
+    // 1. Completed auctions from results endpoint
+    try {
+      const resultsData = await apiFetch('/busca/resultados-leiloes', {
+        codigoDaCidade: city.caixa_city_code,
+        dataFimLance: '',
+        dataInicioLance: '',
+        numeroDoLoteOuContrato: '',
+      });
+
+      const completedAuctions = Array.isArray(resultsData) ? resultsData : [];
+      if (completedAuctions.length) {
+        console.log(`  ${city.name} (${city.caixa_city_code}): ${completedAuctions.length} completed auction(s)`);
+      }
+
+      for (const auction of completedAuctions) {
+        const coLeilao = auction.coLeilao;
+        const resultDate = auction.dtFim ? auction.dtFim.split('/').reverse().join('-') : null;
+        const arquivos = auction.arquivosPublicados ?? [];
+        const relatorioFile = arquivos.find(a => a.tipoArquivo === 'Relatório de Resultados por CPF/CNPJ');
+        const catFile = arquivos.find(a => a.tipoArquivo === 'Catálogo Atualizado');
+        const editalFile = arquivos.find(a => a.tipoArquivo === 'Edital');
+
+        const { data: existing } = await supabase
+          .from('auctions')
+          .select('id')
+          .eq('auction_code', coLeilao)
+          .maybeSingle();
+
+        if (!existing) {
+          const { error } = await supabase.from('auctions').insert({
+            auction_code: coLeilao,
+            co_leilao: coLeilao,
+            city_id: city.id,
+            result_date: resultDate,
+            result_source: 'results_api',
+            has_catalogo_atualizado: !!catFile,
+            catalogo_atualizado_url: catFile?.nome ?? null,
+            relatorio_url: relatorioFile?.nome ?? null,
+            edital_pdf_url: editalFile?.nome ?? null,
+            status: 'COMPLETED',
+          });
+          if (error) {
+            console.error(`    Insert error for ${coLeilao}: ${error.message}`);
+          } else {
+            newAuctions++;
+          }
+        } else {
+          const { error } = await supabase.from('auctions').update({
+            city_id: city.id,
+            result_date: resultDate,
+            has_catalogo_atualizado: !!catFile,
+            catalogo_atualizado_url: catFile?.nome ?? null,
+            relatorio_url: relatorioFile?.nome ?? null,
+            edital_pdf_url: editalFile?.nome ?? null,
+            status: 'COMPLETED',
+          }).eq('id', existing.id);
+          if (error) console.error(`    Update error for ${coLeilao}: ${error.message}`);
+        }
+        totalAuctions++;
+      }
+    } catch (e) {
+      console.error(`  ${city.name}: results error ${e.message}`);
+    }
+
+    // 2. Future auctions from bid periods
+    try {
+      const periodsData = await apiFetch(`/busca/periodos/${city.caixa_city_code}`);
+      const periods = Array.isArray(periodsData) ? periodsData : (periodsData?.periodos ?? []);
+
+      for (const period of periods) {
+        const startDate = period.inicioLance ?? period.dataInicio;
+        const endDate = period.fimLance ?? period.dataFim;
+        if (!startDate) continue;
+
+        // Look for auction codes in period data
+        const coLeilao = period.coLeilao ?? period.co_leilao ?? null;
+        if (coLeilao) {
+          const { data: existing } = await supabase
+            .from('auctions')
+            .select('id')
+            .eq('auction_code', coLeilao)
+            .maybeSingle();
+
+          if (!existing) {
+            await supabase.from('auctions').insert({
+              auction_code: coLeilao,
+              co_leilao: coLeilao,
+              city_id: city.id,
+              bid_start_date: startDate,
+              bid_end_date: endDate,
+              status: 'FUTURE',
+            });
+            newAuctions++;
+            totalAuctions++;
+          }
+        }
+      }
+    } catch (e) {
+      // Periods may not exist for all cities - skip silently
+    }
+  }
+
+  const ms = Date.now() - start;
+  console.log(`\nDone in ${ms}ms | total auctions: ${totalAuctions}, new: ${newAuctions}`);
+}
+
+// ============================================================
+// MODE: SCRAPE-LOTS
+// Fetches lots for all discovered auctions.
+// - Active/future: uses /busca/vitrine API
+// - Completed: downloads and parses Catálogo Atualizado PDF
+// ============================================================
+
+async function scrapeLotsFromVitrine(cityCode, coLeilao, startDate, endDate) {
+  let page = 1, totalItems = null;
+  const allLots = [];
+
+  while (true) {
+    const data = await scrapeLotsPage(cityCode, startDate, endDate, page);
+    const lotes = Array.isArray(data?.lotes) ? data.lotes : [];
+    if (totalItems === null) {
+      totalItems = data.totalRegistros ?? data.totalDeItens ?? 0;
+    }
+
+    if (lotes.length === 0) break;
+
+    for (const lot of lotes) {
+      allLots.push({ ...lot, _coLeilao: coLeilao ?? lot.coLeilao });
+    }
+
+    if (lotes.length < BATCH_SIZE) break;
+    page++;
+    await sleep(200);
+  }
+
+  return { lots: allLots, totalItems };
+}
+
+// Parse lot data from Catálogo Atualizado PDF (completed auction)
+// Returns array of lot objects with lot_number, de_contrato, valor, peso_lote, sg_uf
+function parseCatalogoPdfText(text) {
+  const lots = [];
+
+  // Catálogo format: "LOTE / CONTRATO   ANOTAÇÕES VALOR DESCRIÇÃO"
+  // Example lines:
+  // "0061.000003-9 / 0061.213.00002719-4 UM COLAR, UM PENDENTE... R$ 2.120,00"
+  // Pattern: lot_number / contract_number description R$ valor
+
+  // Split by lines that start with a lot number pattern
+  const lines = text.split('\n');
+
+  // Pattern to match lot line: LOTENUMBER / CONTRACT DESCRIPTION R$ X.XXX,XX
+  // pdfjs-dist joins text items with spaces; text spans across page boundaries
+  // Use [\s\S]*? (any char incl newlines) instead of .+? to handle multi-line descriptions
+  // Lookahead (?=\s) ensures R$ price is at end of lot line without consuming trailing space
+  const lotLinePattern = /(\d{4}\.\d{6}-\d)\s*\/\s*([\d\.]+[\d\-]*)\s+([\s\S]*?)\s+(R\$\s*\d{1,3}(?:\.\d{3})*,\d{2})(?=\s)/gm;
+
+  let match;
+  while ((match = lotLinePattern.exec(text)) !== null) {
+    const lot_number = match[1];
+    const contract = match[2];
+    const description = match[3].trim();
+    const valorStr = match[4];
+    const valor = parseBrMoney(valorStr.replace('R$', '').trim());
+
+    // Extract weight if present in description (e.g., "PESO LOTE: 4,70G" or "PESO LOTE: 4,70 G")
+    // Handle formats: PESO LOTE: X,XXG, PESO: X,XXg, weight: X,XXgr, X,XX G
+    const pesoMatch = description.match(/(?:PESO\s+LOTE[:\s]*|PESO[:\s]*|weight[:\s]*)([\d\.]+,\d{1,3})\s*(?:G(?:RAMAS?)?|GR)?/i)
+      ?? description.match(/([\d\.]+,\d{1,3})\s*G(?:RAMAS?)?\b/i);
+
+    lots.push({
+      lot_number,
+      contract_number: contract,
+      de_contrato: description.substring(0, 200),
+      valor,
+      peso_lote: pesoMatch ? parseBrMoney(pesoMatch[1]) : null,
+      category: extractCategory(description),
+      karat: extractKarat(description),
+    });
+  }
+
+  // Fallback: simple R$ pattern if above didn't work
+  if (lots.length === 0) {
+    const simplePattern = /(\d{4}\.\d{6}-\d)\s+([^\n]+?)(?:R\$\s*([\d\.]+,\d{2}))/g;
+    while ((match = simplePattern.exec(text)) !== null) {
+      lots.push({
+        lot_number: match[1],
+        contract_number: null,
+        de_contrato: match[2].trim().substring(0, 200),
+        valor: parseBrMoney(match[3]),
+        peso_lote: null,
+        category: extractCategory(match[2]),
+        karat: extractKarat(match[2]),
+      });
+    }
+  }
+
+  return lots;
+}
+
+async function modeScrapeLots() {
+  console.log('\n=== Mode: scrape-lots ===');
+  const start = Date.now();
+
+  // Fetch all discovered auctions
+  const { data: auctions } = await supabase
+    .from('auctions')
+    .select('id, auction_code, city_id, bid_start_date, bid_end_date, status, catalogo_atualizado_url')
+    .order('status', { ascending: true });
+
+  if (!auctions?.length) {
+    console.log('  No auctions found. Run --mode=discover first.');
+    return;
+  }
+
+  console.log(`  Found ${auctions.length} auctions to scrape`);
+
+  const cities = await getAllCities();
+  const cityMap = Object.fromEntries(cities.map(c => [c.id, c]));
+
+  let totalNew = 0, totalUpdated = 0, totalPdfLots = 0;
+
+  for (const auction of auctions) {
+    const city = cityMap[auction.city_id];
+    if (!city) continue;
+
+    if (auction.status === 'COMPLETED' && auction.catalogo_atualizado_url) {
+      // Download and parse Catálogo Atualizado PDF for completed auction
+      console.log(`  ${auction.auction_code}: COMPLETED — parsing PDF`);
+      try {
+        const pdfBuffer = await downloadPdf(auction.catalogo_atualizado_url, 'Catalogo');
+        const text = await extractPdfText(pdfBuffer);
+        const pdfLots = parseCatalogoPdfText(text);
+
+        if (pdfLots.length > 0) {
+          console.log(`    PDF parsed ${pdfLots.length} lots from Catálogo`);
+          totalPdfLots += pdfLots.length;
+
+          // Upsert all lots from PDF
+          const insertRows = pdfLots.map(l => ({
+            lot_number: l.lot_number,
+            contract_number: l.contract_number,
+            co_leilao: auction.auction_code,
+            de_contrato: l.de_contrato,
+            valor: l.valor,
+            peso_lote: l.peso_lote,
+            category: l.category,
+            karat: l.karat,
+            city_id: city.id,
+            sg_uf: city.name?.match(/\(([A-Z]{2})\)/)?.[1] ?? null,
+            catalogo_id: auction.catalogo_atualizado_url,
+          }));
+
+          const { error } = await supabase.from('lots').upsert(insertRows, { onConflict: 'city_id,lot_number' });
+          if (error) console.error(`  Upsert error: ${error.message}`);
+          else totalNew += insertRows.length;
+        }
+      } catch (e) {
+        console.log(`    PDF parse error: ${e.message}`);
+      }
+      await sleep(500);
+    } else if (auction.status === 'FUTURE' || auction.status === 'ACTIVE') {
+      // Fetch from vitrine API for active/future auctions
+      const startDate = auction.bid_start_date ?? '';
+      const endDate = auction.bid_end_date ?? '';
+
+      if (!startDate) {
+        console.log(`  ${auction.auction_code}: no bid dates, skipping`);
+        continue;
+      }
+
+      console.log(`  ${auction.auction_code}: ${auction.status} — fetching from API`);
+      await sleep(300);
+
+      try {
+        const { lots: apiLots, totalItems } = await scrapeLotsFromVitrine(
+          city.caixa_city_code,
+          auction.auction_code,
+          startDate,
+          endDate
+        );
+
+        let newCount = 0;
+        for (const lot of apiLots) {
+          const ok = await upsertLot(city.id, lot);
+          if (ok) newCount++;
+        }
+        totalNew += newCount;
+        totalUpdated += apiLots.length;
+        console.log(`    ${apiLots.length} lots fetched (${newCount} new)`);
+      } catch (e) {
+        console.log(`    API error: ${e.message}`);
+      }
+    }
+  }
+
+  const ms = Date.now() - start;
+  console.log(`\nDone in ${ms}ms | new: ${totalNew}, updated: ${totalUpdated}, from PDFs: ${totalPdfLots}`);
+}
+
+// ============================================================
+// MODE: SCRAPE-RESULTS
+// Downloads and parses result PDFs (Relatório de Resultados por CPF/CNPJ)
+// for all completed auctions. Updates lots with winning bids and outcome status.
+// ============================================================
+
+async function modeScrapeResults() {
+  console.log('\n=== Mode: scrape-results ===');
+  const start = Date.now();
+
+  // Get all auctions with relatorio_url that haven't been fully processed
+  const { data: auctions } = await supabase
+    .from('auctions')
+    .select('id, auction_code, relatorio_url, status')
+    .eq('status', 'COMPLETED')
+    .not('relatorio_url', 'is', null)
+    .order('result_date', { ascending: false });
+
+  if (!auctions?.length) {
+    console.log('  No completed auctions with result PDFs found. Run --mode=discover first.');
+    return;
+  }
+
+  console.log(`  Found ${auctions.length} completed auctions to process`);
+
+  let totalUpdated = 0;
+  let totalPdfLots = 0;
+  let totalErrors = 0;
+
+  for (const auction of auctions) {
+    if (!auction.relatorio_url) continue;
+
+    console.log(`  Processing ${auction.auction_code}...`);
+    await sleep(500);
+
+    try {
+      const pdfBuffer = await downloadPdf(auction.relatorio_url, 'Relatorio');
+      const text = await extractPdfText(pdfBuffer);
+      const extracted = parseResultsPdfText(text, auction.auction_code);
+
+      if (extracted.lots && extracted.lots.length > 0) {
+        console.log(`    PDF parsed ${extracted.lots.length} sold lots`);
+        totalPdfLots += extracted.lots.length;
+
+        for (const lotResult of extracted.lots) {
+          const valor_venda = lotResult.winning_bid + (lotResult.tarifa || 0);
+          const { error } = await supabase
+            .from('lots')
+            .update({
+              outcome_status: 'VENDIDO',
+              winning_bid_value: lotResult.winning_bid,
+              tarifa_arrematacao: lotResult.tarifa || null,
+              valor_venda,
+              was_sold: true,
+              result_source: 'relatorio_pdf',
+            })
+            .eq('co_leilao', auction.auction_code)
+            .eq('lot_number', lotResult.lot_number);
+
+          if (!error) totalUpdated++;
+        }
+
+        // Update auction processing date
+        await supabase.from('auctions').update({
+          results_scrape_date: new Date().toISOString(),
+        }).eq('id', auction.id);
+      } else {
+        console.log(`    PDF parsed 0 lots — may be empty or different format`);
+      }
+    } catch (e) {
+      totalErrors++;
+      if (e.message.includes('404')) {
+        console.log(`    PDF unavailable (expired)`);
+      } else {
+        console.log(`    Error: ${e.message}`);
+      }
+    }
+  }
+
+  const ms = Date.now() - start;
+  console.log(`\nDone in ${ms}ms | lots updated: ${totalUpdated}, from PDFs: ${totalPdfLots}, errors: ${totalErrors}`);
+}
+
+// ============================================================
+// MODE: INSIGHT
+// Generates marketing intelligence: avg prices, suggested bid ranges for future auctions.
+// Run after scrape-lots and scrape-results have populated data.
+// ============================================================
+
+async function modeInsight() {
+  console.log('\n=== Mode: insight ===');
+  const start = Date.now();
+
+  // For each completed auction with sold lots, compute stats
+  const { data: completedAuctions } = await supabase
+    .from('auctions')
+    .select('id, auction_code, city_id, result_date')
+    .eq('status', 'COMPLETED')
+    .order('result_date', { ascending: false })
+    .limit(50);
+
+  if (!completedAuctions?.length) {
+    console.log('  No completed auctions found.');
+    return;
+  }
+
+  const cities = await getAllCities();
+  const cityMap = Object.fromEntries(cities.map(c => [c.id, c]));
+
+  let insightsGenerated = 0;
+
+  for (const auction of completedAuctions) {
+    // Get all SOLD lots for this auction
+    const { data: soldLots } = await supabase
+      .from('lots')
+      .select('id, lot_number, de_contrato, valor, winning_bid_value, tarifa_arrematacao, peso_lote')
+      .eq('co_leilao', auction.auction_code)
+      .eq('outcome_status', 'VENDIDO');
+
+    if (!soldLots?.length) continue;
+
+    // Compute stats per auction
+    const bids = soldLots.map(l => l.winning_bid_value || 0).filter(Boolean);
+    const avgBid = bids.reduce((a, b) => a + b, 0) / bids.length;
+    const minBid = Math.min(...bids);
+    const maxBid = Math.max(...bids);
+    const totalRevenue = soldLots.reduce((sum, l) => sum + (l.winning_bid_value || 0), 0);
+
+    // Extract category hints from descriptions
+    const descriptions = soldLots.map(l => l.de_contrato).filter(Boolean);
+    const ouroCount = descriptions.filter(d => /ouro|ouro\s/i.test(d)).length;
+    const prataCount = descriptions.filter(d => /prata/i.test(d)).length;
+    const pedrasCount = descriptions.filter(d => /pedra|diamante|esmeralda| safira|topazio/i.test(d)).length;
+
+    console.log(`  ${auction.auction_code}: ${soldLots.length} sold, avg R$ ${avgBid.toFixed(0)}, range R$ ${minBid.toFixed(0)}–${maxBid.toFixed(0)}, revenue R$ ${totalRevenue.toFixed(0)}`);
+
+    // Update auction with insight data
+    await supabase.from('auctions').update({
+      total_lots_sold: soldLots.length,
+      avg_winning_bid: Math.round(avgBid),
+      min_winning_bid: Math.round(minBid),
+      max_winning_bid: Math.round(maxBid),
+      total_revenue: Math.round(totalRevenue),
+      ouro_lots: ouroCount,
+      prata_lots: prataCount,
+      pedras_lots: pedrasCount,
+      insight_generated_at: new Date().toISOString(),
+    }).eq('id', auction.id);
+
+    insightsGenerated++;
+  }
+
+  // Generate suggested bids for FUTURE auctions based on similar past lots
+  const { data: futureAuctions } = await supabase
+    .from('auctions')
+    .select('id, auction_code, city_id')
+    .eq('status', 'FUTURE');
+
+  if (futureAuctions?.length) {
+    console.log(`\n  Future auctions (${futureAuctions.length}) — generating suggested bid ranges`);
+
+    for (const future of futureAuctions) {
+      const city = cityMap[future.city_id];
+      if (!city) continue;
+
+      // Get similar past auctions in same state/city
+      const stateUf = city.name?.match(/\(([A-Z]{2})\)/)?.[1];
+      const { data: pastAuctions } = await supabase
+        .from('auctions')
+        .select('id, auction_code, avg_winning_bid, min_winning_bid, max_winning_bid, total_lots_sold')
+        .eq('status', 'COMPLETED')
+        .gte('avg_winning_bid', 1)
+        .limit(10);
+
+      if (pastAuctions?.length) {
+        const avgOfAvg = pastAuctions.reduce((s, a) => s + (a.avg_winning_bid || 0), 0) / pastAuctions.length;
+        const avgCount = pastAuctions.reduce((s, a) => s + (a.total_lots_sold || 0), 0) / pastAuctions.length;
+
+        await supabase.from('auctions').update({
+          suggested_min_bid: Math.round(avgOfAvg * 0.6),
+          suggested_max_bid: Math.round(avgOfAvg * 1.2),
+          suggested_avg_bid: Math.round(avgOfAvg),
+          based_on_auctions: pastAuctions.map(a => a.auction_code).join(','),
+        }).eq('id', future.id);
+
+        console.log(`  ${future.auction_code}: suggested R$ ${Math.round(avgOfAvg * 0.6)}–${Math.round(avgOfAvg * 1.2)} (avg R$ ${Math.round(avgOfAvg)}, based on ${pastAuctions.length} past auctions)`);
+      }
+    }
+  }
+
+  const ms = Date.now() - start;
+  console.log(`\nDone in ${ms}ms | insights generated: ${insightsGenerated}`);
+}
+
+// ============================================================
+// MODE: AUCTIONS (link lots to auctions table)
+// ============================================================
+
+async function modeAuctions() {
+  console.log('\n=== Mode: auctions ===');
+  const start = Date.now();
+
+  // Process ALL auction codes in batches of unique co_leilao values
+  const { data: allOrphanCodes } = await supabase
+    .from('lots')
+    .select('co_leilao')
+    .not('co_leilao', 'is', null)
+    .is('auction_id', null);
+
+  if (!allOrphanCodes?.length) {
+    console.log('  No orphan lots found — all lots already linked');
+    return;
+  }
+
+  const coLeiloes = [...new Set(allOrphanCodes.map(l => l.co_leilao))];
+  console.log(`  Found ${coLeiloes.length} auction codes to link`);
+
+  let linked = 0;
+  for (const coLeilao of coLeiloes) {
+    // Find or create the auction
+    const { data: existing } = await supabase
+      .from('auctions')
+      .select('id')
+      .eq('auction_code', coLeilao)
+      .maybeSingle();
+
+    let auctionId = existing?.id;
+
+    if (!auctionId) {
+      // Create the auction stub (will be enriched later by edilal mode)
+      const { data: newAuction } = await supabase
+        .from('auctions')
+        .insert({ auction_code: coLeilao })
+        .select('id')
+        .single();
+      auctionId = newAuction?.id;
+    }
+
+    if (!auctionId) {
+      console.error(`  Could not create auction for ${coLeilao}: ${err.message}`);
+      continue;
+    }
+
+    // Link ALL lots with this co_leilao to the auction (not just 1)
+    const { error } = await supabase
+      .from('lots')
+      .update({ auction_id: auctionId })
+      .eq('co_leilao', coLeilao);
+
+    if (error) {
+      console.error(`  Link error for ${coLeilao}: ${error.message}`);
+    } else {
+      linked++;
+    }
+  }
+
+  const ms = Date.now() - start;
+  console.log(`\nDone in ${ms}ms | linked ${linked} auctions`);
+}
+
+// ============================================================
+// MAIN
+// ============================================================
+
+function parseArgs() {
+  const args = {};
+  for (const arg of process.argv.slice(2)) {
+    const [k, v] = arg.split('=');
+    args[k.replace(/^--/, '')] = v;
+  }
+  return args;
+}
+
+async function main() {
+  const { mode, 'auction-code': auctionCode } = parseArgs();
+
+  if (!mode) {
+    console.error('Usage: node scraper.js --mode=<mode> [--auction-code=<code>]');
+    console.error('Modes: states-cities, bid-periods, active-lots, results, edilal, auctions, dedup');
+    process.exit(1);
+  }
+
+  console.log(`Vitrine de Joias Scraper | Mode: ${mode} | ${new Date().toISOString()}`);
+
+  switch (mode) {
+    case 'states-cities':  await modeStatesCities(); break;
+    case 'bid-periods':    await modeBidPeriods(); break;
+    case 'active-lots':    await modeActiveLots(); break;
+    case 'results':        await modeResults(); break;
+    case 'edital':         await modeEdital(auctionCode); break;
+    case 'auctions':       await modeAuctions(); break;
+    case 'dedup':          await modeDedup(); break;
+    case 'discover':       await modeDiscover(); break;
+    case 'scrape-lots':    await modeScrapeLots(); break;
+    case 'scrape-results': await modeScrapeResults(); break;
+    case 'insight':        await modeInsight(); break;
+    default:
+      console.error(`Unknown mode: ${mode}`);
+      process.exit(1);
+  }
+}
+
+main().catch(e => {
+  console.error('Fatal:', e);
+  process.exit(1);
+});

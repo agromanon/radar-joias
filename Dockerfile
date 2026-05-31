@@ -1,5 +1,4 @@
 # ---- Dependencies stage ----
-# v2 — force rebuild
 FROM node:20-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
