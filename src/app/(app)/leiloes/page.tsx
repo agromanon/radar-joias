@@ -8,6 +8,9 @@ import { useUser } from "@/hooks/useUser";
 
 // CAIXA changed image URL base from /vitrinedejoias to /vitrinearquivos/fotos
 function fixImageUrl(url: string): string {
+  if (url.startsWith('/')) {
+    return `https://servicebus2.caixa.gov.br/vitrinearquivos/fotos${url}`;
+  }
   if (url.includes('servicebus2.caixa.gov.br/vitrinedejoias/')) {
     return url.replace('servicebus2.caixa.gov.br/vitrinedejoias/', 'servicebus2.caixa.gov.br/vitrinearquivos/fotos/');
   }

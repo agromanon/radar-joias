@@ -156,6 +156,10 @@ type SimilarLot = {
 // CAIXA image URL fix
 function fixImageUrl(url: string | null): string | null {
   if (!url) return null;
+  // Handle relative paths (e.g. /1087/1/1087213000207103/FRENTEP.JPG)
+  if (url.startsWith("/")) {
+    return `https://servicebus2.caixa.gov.br/vitrinearquivos/fotos${url}`;
+  }
   if (url.includes("servicebus2.caixa.gov.br/vitrinedejoias/")) {
     return url.replace("servicebus2.caixa.gov.br/vitrinedejoias/", "servicebus2.caixa.gov.br/vitrinearquivos/fotos/");
   }
