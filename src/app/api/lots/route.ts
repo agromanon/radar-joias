@@ -152,12 +152,71 @@ export async function GET(request: NextRequest) {
       uniqueAuctioneers = [...new Set(auctioneers?.map((a: any) => a.auctioneer) || [])];
     }
 
-    // Use auction's bid dates, fallback to result_date for completed auctions
+    // Get bid periods for cities — match to auction's result_date when available
+    const cityIds = [...new Set((lots as any)?.map((l: any) => l.city_id).filter(Boolean) || [])];
+    let bidPeriodsByCity: Record<number, {start_date: string, end_date: string, result_date?: string}> = {};
+    if (cityIds.length > 0) {
+      const { data: periods } = await svc
+        .from("bid_periods")
+        .select("city_id, start_date, end_date, is_active")
+        .in("city_id", cityIds)
+        .order("end_date", { ascending: false });
+      if (periods) {
+        const seen = new Set<number>();
+        for (const p of periods) {
+          if (!seen.has(p.city_id)) {
+            seen.add(p.city_id);
+            bidPeriodsByCity[p.city_id] = { start_date: p.start_date, end_date: p.end_date };
+          }
+        }
+      }
+    }
+
+    // Also get result_dates for completed auctions
+    const auctionIds = [...new Set((lots as any)?.map((l: any) => l.auction_id).filter(Boolean) || [])];
+    let resultDatesByAuctionId: Record<number, string> = {};
+    if (auctionIds.length > 0) {
+      const { data: completedAuctions } = await svc
+        .from("auctions")
+        .select("id, result_date, status")
+        .in("id", auctionIds)
+        .eq("status", "COMPLETED");
+      if (completedAuctions) {
+        for (const a of completedAuctions) {
+          if (a.result_date) {
+            resultDatesByAuctionId[a.id] = a.result_date;
+          }
+        }
+      }
+    }
+
+    // Use auction's bid dates if available, else bid_periods, else result_date (completed)
     let lotsWithSourceUrl = (lots as any)?.map((lot: any) => {
       const auction = lot.auctions;
-      // Use bid_end_date if available, otherwise use result_date (for completed auctions)
-      const bid_end = auction?.bid_end_date || (auction?.status === "COMPLETED" ? auction?.result_date : null);
-      const bid_start = auction?.bid_start_date || null;
+      // auction bid dates (usually null — scrape didn't capture them)
+      const bid_end_auction = auction?.bid_end_date || null;
+      const bid_start_auction = auction?.bid_start_date || null;
+
+      // city-wide bid_periods (match by city)
+      const cityPeriod = bidPeriodsByCity[lot.city_id];
+
+      // For completed auctions, prefer result_date over city-wide bid_periods
+      const isCompleted = auction?.status === "COMPLETED" || lot.was_sold;
+      const result_date = resultDatesByAuctionId[lot.auction_id];
+
+      // Priority: auction dates > (completed ? result_date) > bid_periods
+      let bid_end = bid_end_auction;
+      let bid_start = bid_start_auction;
+      if (!bid_end) {
+        if (isCompleted && result_date) {
+          bid_end = result_date;
+          bid_start = null;
+        } else if (cityPeriod) {
+          bid_end = cityPeriod.end_date;
+          bid_start = cityPeriod.start_date;
+        }
+      }
+
       return {
         ...lot,
         source_url: lot.metadata?.source_url || lot.source_url,
