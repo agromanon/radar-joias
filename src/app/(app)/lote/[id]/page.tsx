@@ -279,6 +279,16 @@ export default function LotDetailPage() {
       let lots = (data.lots || [])
         .filter((l: any) => l.winning_bid_value && l.id !== lotData.id);
 
+      // For silver lots: exclude mixed-metal items (have both "prata" AND "ouro" in tags)
+      if (isSilver) {
+        lots = lots.filter((l: any) => {
+          const t = l.tags || [];
+          const hasPrata = t.some((tag: string) => tag.toLowerCase().includes("prata"));
+          const hasOuro = t.some((tag: string) => tag.toLowerCase().includes("ouro"));
+          return hasPrata && !hasOuro;
+        });
+      }
+
       // Filter by weight similarity (0.7x - 1.3x)
       lots = lots.filter((l: any) => {
         const lw = l.weight_enriched;
@@ -336,6 +346,16 @@ export default function LotDetailPage() {
       if (!res.ok) return;
       const data = await res.json();
       let lots = (data.lots || []).filter((l: any) => l.winning_bid_value);
+
+      // For silver lots: exclude mixed-metal items (have both "prata" AND "ouro")
+      if (isSilver) {
+        lots = lots.filter((l: any) => {
+          const t = l.tags || [];
+          const hasPrata = t.some((tag: string) => tag.toLowerCase().includes("prata"));
+          const hasOuro = t.some((tag: string) => tag.toLowerCase().includes("ouro"));
+          return hasPrata && !hasOuro;
+        });
+      }
 
       // Filter by weight similarity (0.7x - 1.3x)
       if (lotData.weight_enriched && lotData.weight_enriched > 0) {
