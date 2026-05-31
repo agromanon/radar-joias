@@ -244,8 +244,6 @@ export async function GET(request: NextRequest) {
         source_url: lot.metadata?.source_url || lot.source_url,
         bid_end,
         bid_start,
-        // DEBUG info attached to each lot
-        _debug: lot.id === 13152 ? { auction_id: lot.auction_id, auction_status: auction?.status, isCompleted, cityPeriod: bidPeriodsByCity[lot.city_id], bid_end_auction, result_date } : undefined,
       };
     });
 
