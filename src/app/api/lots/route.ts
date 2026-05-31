@@ -184,9 +184,24 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    // Fetch auction data separately (join via FK not reliable in this context)
+    const auctionIds = [...new Set((lots as any)?.map((l: any) => l.auction_id).filter(Boolean) || [])];
+    let auctionDataById: Record<number, {status: string, result_date: string, bid_end_date: string, bid_start_date: string}> = {};
+    if (auctionIds.length > 0) {
+      const { data: auctionRows } = await svc
+        .from("auctions")
+        .select("id, status, result_date, bid_end_date, bid_start_date")
+        .in("id", auctionIds);
+      if (auctionRows) {
+        for (const a of auctionRows) {
+          auctionDataById[a.id] = a;
+        }
+      }
+    }
+
     // Use auction's bid dates if available, else bid_periods, else result_date (completed)
     let lotsWithSourceUrl = (lots as any)?.map((lot: any) => {
-      const auction = lot.auctions;
+      const auction = auctionDataById[lot.auction_id];
       const bid_end_auction = auction?.bid_end_date || null;
       const bid_start_auction = auction?.bid_start_date || null;
 
