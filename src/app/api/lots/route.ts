@@ -152,9 +152,9 @@ export async function GET(request: NextRequest) {
       uniqueAuctioneers = [...new Set(auctioneers?.map((a: any) => a.auctioneer) || [])];
     }
 
-    // Get bid periods for cities — match to auction's result_date when available
+    // Get bid periods for cities — store both past and future periods per city
     const cityIds = [...new Set((lots as any)?.map((l: any) => l.city_id).filter(Boolean) || [])];
-    let bidPeriodsByCity: Record<number, {start_date: string, end_date: string, result_date?: string}> = {};
+    let bidPeriodsByCity: Record<number, {past: {start_date: string, end_date: string} | null, future: {start_date: string, end_date: string} | null}> = {};
     if (cityIds.length > 0) {
       const { data: periods } = await svc
         .from("bid_periods")
@@ -162,29 +162,21 @@ export async function GET(request: NextRequest) {
         .in("city_id", cityIds)
         .order("end_date", { ascending: false });
       if (periods) {
-        const seen = new Set<number>();
         for (const p of periods) {
-          if (!seen.has(p.city_id)) {
-            seen.add(p.city_id);
-            bidPeriodsByCity[p.city_id] = { start_date: p.start_date, end_date: p.end_date };
+          if (!bidPeriodsByCity[p.city_id]) {
+            bidPeriodsByCity[p.city_id] = { past: null, future: null };
           }
-        }
-      }
-    }
-
-    // Also get result_dates for completed auctions
-    const auctionIds = [...new Set((lots as any)?.map((l: any) => l.auction_id).filter(Boolean) || [])];
-    let resultDatesByAuctionId: Record<number, string> = {};
-    if (auctionIds.length > 0) {
-      const { data: completedAuctions } = await svc
-        .from("auctions")
-        .select("id, result_date, status")
-        .in("id", auctionIds)
-        .eq("status", "COMPLETED");
-      if (completedAuctions) {
-        for (const a of completedAuctions) {
-          if (a.result_date) {
-            resultDatesByAuctionId[a.id] = a.result_date;
+          const today = new Date().toISOString().split("T")[0];
+          if (p.end_date < today) {
+            // Past period — store the most recent past period
+            if (!bidPeriodsByCity[p.city_id].past) {
+              bidPeriodsByCity[p.city_id].past = { start_date: p.start_date, end_date: p.end_date };
+            }
+          } else {
+            // Future period — store the nearest future period
+            if (!bidPeriodsByCity[p.city_id].future) {
+              bidPeriodsByCity[p.city_id].future = { start_date: p.start_date, end_date: p.end_date };
+            }
           }
         }
       }
@@ -193,27 +185,40 @@ export async function GET(request: NextRequest) {
     // Use auction's bid dates if available, else bid_periods, else result_date (completed)
     let lotsWithSourceUrl = (lots as any)?.map((lot: any) => {
       const auction = lot.auctions;
-      // auction bid dates (usually null — scrape didn't capture them)
       const bid_end_auction = auction?.bid_end_date || null;
       const bid_start_auction = auction?.bid_start_date || null;
 
-      // city-wide bid_periods (match by city)
-      const cityPeriod = bidPeriodsByCity[lot.city_id];
-
-      // For completed auctions, prefer result_date over city-wide bid_periods
       const isCompleted = auction?.status === "COMPLETED" || lot.was_sold;
-      const result_date = resultDatesByAuctionId[lot.auction_id];
+      const result_date = auction?.result_date || null;
 
-      // Priority: auction dates > (completed ? result_date) > bid_periods
+      // For completed auctions: use most recent past bid_period, or auction result_date
+      // For active auctions: use nearest future bid_period
       let bid_end = bid_end_auction;
       let bid_start = bid_start_auction;
+
       if (!bid_end) {
-        if (isCompleted && result_date) {
-          bid_end = result_date;
-          bid_start = null;
-        } else if (cityPeriod) {
-          bid_end = cityPeriod.end_date;
-          bid_start = cityPeriod.start_date;
+        const cityPeriod = bidPeriodsByCity[lot.city_id];
+        if (isCompleted) {
+          // Completed: prefer past period, then result_date, then future period
+          if (cityPeriod?.past) {
+            bid_end = cityPeriod.past.end_date;
+            bid_start = cityPeriod.past.start_date;
+          } else if (result_date) {
+            bid_end = result_date;
+            bid_start = null;
+          } else if (cityPeriod?.future) {
+            bid_end = cityPeriod.future.end_date;
+            bid_start = cityPeriod.future.start_date;
+          }
+        } else {
+          // Active: use nearest future period
+          if (cityPeriod?.future) {
+            bid_end = cityPeriod.future.end_date;
+            bid_start = cityPeriod.future.start_date;
+          } else if (cityPeriod?.past) {
+            bid_end = cityPeriod.past.end_date;
+            bid_start = cityPeriod.past.start_date;
+          }
         }
       }
 
