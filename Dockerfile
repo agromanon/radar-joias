@@ -16,6 +16,8 @@ ENV SUPABASE_URL="https://placeholder.supabase.co"
 ENV SUPABASE_SERVICE_ROLE_KEY="placeholder"
 ENV LLM_API_KEY="placeholder"
 
+ENV NODE_OPTIONS="--max-old-space-size=1536"
+
 RUN npm run build
 
 # ---- Production stage ----
