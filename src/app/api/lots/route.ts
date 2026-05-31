@@ -116,22 +116,24 @@ export async function GET(request: NextRequest) {
       query = query.eq("id", parseInt(idParam));
     }
 
-    // Pagination
-    const from = (page - 1) * limit;
-    const to = from + limit - 1;
-
     // Sorting - bid_end is computed from bid_periods, so we sort in memory after fetching
     // price_asc/desc use valor, id uses id, otherwise default to id
     let dbSortCol = "id";
     if (sort === "price") dbSortCol = "valor";
     else if (sort === "id") dbSortCol = "id";
 
-    if (sort !== "bid_end") {
+    // For bid_end sort, we must fetch all results first then sort+paginate in memory
+    // because bid_end comes from bid_periods join and can't be sorted in SQL
+    const isBidEndSort = sort === "bid_end";
+
+    if (!isBidEndSort) {
       query = query.order(dbSortCol, { ascending: order === "asc" });
     }
 
-    // Execute query with pagination
-    const { data: lots, error, count } = await query.range(from, to);
+    // Execute query — use range pagination for normal sorts, fetch all for bid_end sort
+    const { data: lots, error, count } = isBidEndSort
+      ? await query.limit(500) // cap at 500 for bid_end sort to prevent OOM
+      : await query.range(from, to);
 
     if (error) {
       console.error("Error fetching lots:", error);
@@ -232,7 +234,7 @@ export async function GET(request: NextRequest) {
 
     // Sort by bid_end if requested (most urgent first)
     // Past bid_end (auction ended, awaiting results) goes to bottom; future dates sort normally
-    if (sort === "bid_end") {
+    if (isBidEndSort) {
       const now = Date.now();
       lotsWithSourceUrl.sort((a: any, b: any) => {
         const aEnd = a.bid_end ? new Date(a.bid_end).getTime() : Infinity;
@@ -243,7 +245,13 @@ export async function GET(request: NextRequest) {
         if (!aPast && bPast) return -1; // future → bring forward
         return aEnd - bEnd;              // both same status → sort ascending
       });
+      // Apply pagination after sorting
+      const fromIdx = (page - 1) * limit;
+      const toIdx = fromIdx + limit;
+      lotsWithSourceUrl = lotsWithSourceUrl.slice(fromIdx, toIdx);
     }
+
+    const totalSorted = isBidEndSort ? (count || 0) : (count || 0);
 
     // Return response with pagination metadata
     return NextResponse.json({
@@ -251,9 +259,9 @@ export async function GET(request: NextRequest) {
       pagination: {
         page,
         limit,
-        total: count || 0,
-        totalPages: Math.ceil((count || 0) / limit),
-        hasMore: (count || 0) > to + 1,
+        total: totalSorted,
+        totalPages: Math.ceil(totalSorted / limit),
+        hasMore: totalSorted > page * limit,
       },
       filters: {
         auctioneers: uniqueAuctioneers,
