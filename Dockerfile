@@ -10,11 +10,11 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-ENV NEXT_PUBLIC_SUPABASE_URL="https://placeholder.supabase.co"
-ENV NEXT_PUBLIC_SUPABASE_ANON_KEY="placeholder"
-ENV SUPABASE_URL="https://placeholder.supabase.co"
-ENV SUPABASE_SERVICE_ROLE_KEY="placeholder"
-ENV LLM_API_KEY="placeholder"
+ENV NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL:-https://placeholder.supabase.co}
+ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY:-placeholder}
+ENV SUPABASE_URL=${SUPABASE_URL:-https://placeholder.supabase.co}
+ENV SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-placeholder}
+ENV LLM_API_KEY=${LLM_API_KEY:-placeholder}
 
 ENV NODE_OPTIONS="--max-old-space-size=1536"
 
