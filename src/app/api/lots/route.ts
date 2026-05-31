@@ -1,6 +1,7 @@
+"use server";
+
 import { NextRequest, NextResponse } from "next/server";
-import { createServerClient } from "@/lib/supabase-server";
-import { getServerUser } from "@/lib/auth";
+import { createAdminClient } from "@/lib/supabase-server";
 
 /**
  * GET /api/lots
@@ -17,35 +18,65 @@ import { getServerUser } from "@/lib/auth";
  * - limit: Items per page (default 20, max 100)
  * - sort: Sort field (created_at, closing_at, current_bid)
  * - order: Sort order (asc, desc)
+ * - leiloes: If "true", applies active auction filters (outcome_status=null, enrichment_status=enriched, valor=not.null)
  */
 export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerClient();
-    const searchParams = await request.nextUrl.searchParams;
+    const svc = await createAdminClient();
+    const searchParams = request.nextUrl.searchParams;
 
     const category = searchParams.get("category");
     const state = searchParams.get("state");
+    const karat = searchParams.get("karat");
     const risk_score = searchParams.get("risk_score");
     const min_bid = searchParams.get("min_bid");
     const max_bid = searchParams.get("max_bid");
+    const min_weight = searchParams.get("min_weight");
+    const max_weight = searchParams.get("max_weight");
     const search = searchParams.get("search");
     const page = parseInt(searchParams.get("page") || "1");
     const limit = Math.min(parseInt(searchParams.get("limit") || "20"), 100);
-    const sort = searchParams.get("sort") || "created_at";
+    const sort = searchParams.get("sort") || "id";
     const order = searchParams.get("order") || "desc";
+    const leiloes = searchParams.get("leiloes") === "true";
+    const vendas = searchParams.get("vendas") === "true";
 
     // Build query
-    let query = supabase
+    const selectCols = leiloes || vendas
+      ? "*, auctions(auction_code, bid_end_date, result_date, status, centralizer_unit, bid_start_date)"
+      : "*";
+    let query = svc
       .from("lots")
-      .select("*", { count: "exact" });
+      .select(selectCols, { count: "exact" });
+
+    // Leiloes active auction filters
+    if (leiloes) {
+      query = query.is("outcome_status", null);
+      query = query.eq("enrichment_status", "enriched");
+      query = query.not("valor", "is", null);
+    }
+
+    // Vendas sold lots filters
+    if (vendas) {
+      query = query.eq("was_sold", true);
+    }
 
     // Apply filters
     if (category) {
-      query = query.eq("category", category);
+      // Use category_enriched for enriched types (Aliança, Anel, etc.), fallback to category
+      query = query.or(`category_enriched.ilike.%${category}%,category.eq.${category}`);
     }
 
     if (state) {
-      query = query.eq("location_state", state);
+      query = query.eq("sg_uf", state);
+    }
+
+    if (karat) {
+      if (karat === "unspecified") {
+        query = query.is("karat", null);
+      } else {
+        query = query.eq("karat", karat);
+      }
     }
 
     if (risk_score) {
@@ -53,24 +84,45 @@ export async function GET(request: NextRequest) {
     }
 
     if (min_bid) {
-      query = query.gte("current_bid", parseFloat(min_bid));
+      query = query.gte("valor", parseFloat(min_bid));
     }
 
     if (max_bid) {
-      query = query.lte("current_bid", parseFloat(max_bid));
+      query = query.lte("valor", parseFloat(max_bid));
     }
 
-    // Full-text search
+    if (min_weight) {
+      query = query.gte("weight_enriched", parseFloat(min_weight));
+    }
+
+    if (max_weight) {
+      query = query.lte("weight_enriched", parseFloat(max_weight));
+    }
+
+    // Full-text search on de_contrato
     if (search) {
-      query = query.textSearch("title", search);
+      query = query.ilike("de_contrato", `%${search}%`);
+    }
+
+    // Fetch by specific lot ID (used by lot detail page)
+    const idParam = searchParams.get("id");
+    if (idParam) {
+      query = query.eq("id", parseInt(idParam));
     }
 
     // Pagination
     const from = (page - 1) * limit;
     const to = from + limit - 1;
 
-    // Sorting
-    query = query.order(sort, { ascending: order === "asc" });
+    // Sorting - bid_end is computed from bid_periods, so we sort in memory after fetching
+    // price_asc/desc use valor, id uses id, otherwise default to id
+    let dbSortCol = "id";
+    if (sort === "price") dbSortCol = "valor";
+    else if (sort === "id") dbSortCol = "id";
+
+    if (sort !== "bid_end") {
+      query = query.order(dbSortCol, { ascending: order === "asc" });
+    }
 
     // Execute query with pagination
     const { data: lots, error, count } = await query.range(from, to);
@@ -84,7 +136,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Get unique auctioneers for filter dropdown
-    const { data: auctioneers } = await supabase
+    const { data: auctioneers } = await svc
       .from("lots")
       .select("auctioneer")
       .not("auctioneer", "is", null)
@@ -92,11 +144,50 @@ export async function GET(request: NextRequest) {
 
     const uniqueAuctioneers = [...new Set(auctioneers?.map((a) => a.auctioneer) || [])];
 
-    // Extract source_url from metadata for each lot
-    const lotsWithSourceUrl = lots?.map((lot) => ({
+    // Get bid periods for the lot's city (include all recent, not just active)
+    const cityIds = [...new Set((lots as any)?.map((l: any) => l.city_id).filter(Boolean) || [])];
+    let bidPeriodsByCity: Record<number, {start_date: string, end_date: string}> = {};
+    if (cityIds.length > 0) {
+      // Get all bid periods for these cities, sorted by end_date descending (most recent first)
+      const { data: periods } = await svc
+        .from("bid_periods")
+        .select("city_id, start_date, end_date, is_active")
+        .in("city_id", cityIds)
+        .order("end_date", { ascending: false });
+      if (periods) {
+        // Use the most recent period for each city
+        const seen = new Set<number>();
+        for (const p of periods) {
+          if (!seen.has(p.city_id)) {
+            seen.add(p.city_id);
+            bidPeriodsByCity[p.city_id] = { start_date: p.start_date, end_date: p.end_date };
+          }
+        }
+      }
+    }
+
+    // Extract source_url and add bid_end info to each lot
+    let lotsWithSourceUrl = (lots as any)?.map((lot: any) => ({
       ...lot,
       source_url: lot.metadata?.source_url || lot.source_url,
+      bid_end: bidPeriodsByCity[lot.city_id]?.end_date || null,
+      bid_start: bidPeriodsByCity[lot.city_id]?.start_date || null,
     })) || [];
+
+    // Sort by bid_end if requested (most urgent first)
+    // Past bid_end (auction ended, awaiting results) goes to bottom; future dates sort normally
+    if (sort === "bid_end") {
+      const now = Date.now();
+      lotsWithSourceUrl.sort((a: any, b: any) => {
+        const aEnd = a.bid_end ? new Date(a.bid_end).getTime() : Infinity;
+        const bEnd = b.bid_end ? new Date(b.bid_end).getTime() : Infinity;
+        const aPast = aEnd < now;
+        const bPast = bEnd < now;
+        if (aPast && !bPast) return 1;   // past → push down
+        if (!aPast && bPast) return -1; // future → bring forward
+        return aEnd - bEnd;              // both same status → sort ascending
+      });
+    }
 
     // Return response with pagination metadata
     return NextResponse.json({
@@ -163,7 +254,7 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
 
     // Validate required fields
-    if (!body.title || !body.auctioneer || !body.category) {
+    if (!body.lot_number) {
       return NextResponse.json(
         { error: "Missing required fields: title, auctioneer, category" },
         { status: 400 }
@@ -171,26 +262,19 @@ export async function POST(request: NextRequest) {
     }
 
     // Create lot using service role client
-    const { data: { user } } = await supabase.auth.getUser();
-    const serviceRoleSupabase = supabase; // In production, use service role client
-
-    const { data, error } = await serviceRoleSupabase
+    const svc = await createAdminClient();
+    const { data, error } = await svc
       .from("lots")
       .insert({
-        title: body.title,
-        auctioneer: body.auctioneer,
-        current_bid: body.current_bid,
-        image_url: body.image_url,
-        risk_score: body.risk_score || "MÉDIO",
-        category: body.category,
-        edict_url: body.edict_url,
-        closing_at: body.closing_at,
-        location_lat: body.location_lat,
-        location_lng: body.location_lng,
-        location_city: body.location_city,
-        location_state: body.location_state,
-        description: body.description,
-        metadata: body.metadata || {},
+        lot_number: body.lot_number,
+        contract_number: body.contract_number,
+        de_contrato: body.de_contrato,
+        valor: body.valor,
+        url_imagem_capa: body.url_imagem_capa,
+        outcome_status: body.outcome_status,
+        sg_uf: body.sg_uf,
+        co_leilao: body.co_leilao,
+        city_id: body.city_id,
       })
       .select()
       .single();

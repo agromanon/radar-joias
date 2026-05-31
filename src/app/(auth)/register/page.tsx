@@ -83,10 +83,10 @@ export default function RegisterPage() {
         <div className="max-w-md mx-auto space-y-10 z-10">
           <div>
             <h2 className="text-4xl font-bold tracking-tight text-white mb-4">
-              Invista com Inteligência Artificial
+              Encontre as Melhores Jóias
             </h2>
             <p className="text-[#8E9297] text-lg">
-              Dezenas de leiloeiros cruzados em tempo real no Brasil, extraindo a margem do edital em segundos.
+              Nossa IA cruza todos os leilões da CAIXA em tempo real, extraindo oportunidades de ouro em segundos.
             </p>
           </div>
 
@@ -96,8 +96,8 @@ export default function RegisterPage() {
                 <Brain className="w-6 h-6 text-[#5865F2]" />
               </div>
               <div>
-                <h4 className="text-white font-bold">Leitura Automática de Editais</h4>
-                <p className="text-[#8E9297] text-sm mt-1">Nós mapeamos as entrelinhas e as taxas do pátio para você ignorar o leilão ruim.</p>
+                <h4 className="text-white font-bold">Scraper Automático da CAIXA</h4>
+                <p className="text-[#8E9297] text-sm mt-1">Mapeamos novas jóias em tempo real e comparamos com preços de mercado.</p>
               </div>
             </div>
 
@@ -106,8 +106,8 @@ export default function RegisterPage() {
                 <ShieldCheck className="w-6 h-6 text-[#10B981]" />
               </div>
               <div>
-                <h4 className="text-white font-bold">Risco Balizado no Lucro Real</h4>
-                <p className="text-[#8E9297] text-sm mt-1">Conheça o Teto do Lote para não perder com a emoção do Pregão Presencial/Online.</p>
+                <h4 className="text-white font-bold">Estimativa de Preço por Jóia</h4>
+                <p className="text-[#8E9297] text-sm mt-1">Consulte o valor estimado de cada peça antes de fazer seu lance.</p>
               </div>
             </div>
 
@@ -117,7 +117,7 @@ export default function RegisterPage() {
               </div>
               <div>
                 <h4 className="text-white font-bold">Alertas Instantâneos (Meus Alertas)</h4>
-                <p className="text-[#8E9297] text-sm mt-1">Trackeie as palavras-chave (Ex: Cobre, Triturador) na Madrugada e receba Pushes.</p>
+                <p className="text-[#8E9297] text-sm mt-1">Trackeie palavras-chave (Ex: Alianças, Relógios, Ouro 18k) e receba notificações.</p>
               </div>
             </div>
           </div>

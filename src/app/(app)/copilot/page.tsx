@@ -20,7 +20,7 @@ export default function CopilotPage() {
     {
       id: "1",
       role: "assistant",
-      content: "Olá! Sou o **Radar Copilot**, seu agente de inteligência artificial para estratégia de leilões. Como posso ajudar você hoje?\n\nPosso analisar editais, buscar lotes específicos com métricas de ROI ou configurar rastreadores autônomos para você.",
+      content: "Olá! Sou o **Radar Copilot**, seu agente de inteligência artificial para estratégia em leilões de joias da CAIXA. Como posso ajudar você hoje?\n\nPosso buscar lotes similares com base em karatagem e peso, analisar editais, calcular faixa de lance ideal ou configurar alertas para novas peças.",
       timestamp: new Date(),
     },
   ]);
@@ -242,7 +242,7 @@ export default function CopilotPage() {
                  <Link href="/settings/billing" className="block w-full bg-[#5865F2] hover:bg-[#4752C4] text-white py-4 rounded-2xl font-bold text-lg transition-all shadow-xl shadow-[#5865F2]/30">
                     Fazer Upgrade Agora
                  </Link>
-                 <Link href="/dashboard" className="block w-full bg-[#1C2129] border border-[#272A31] text-[#8E9297] hover:text-white py-4 rounded-2xl font-bold transition-all">
+                 <Link href="/leiloes" className="block w-full bg-[#1C2129] border border-[#272A31] text-[#8E9297] hover:text-white py-4 rounded-2xl font-bold transition-all">
                     Voltar ao Dashboard
                  </Link>
               </div>

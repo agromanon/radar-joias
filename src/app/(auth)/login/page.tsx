@@ -111,10 +111,10 @@ export default function LoginPage() {
         <div className="max-w-md mx-auto space-y-10 z-10">
           <div>
             <h2 className="text-4xl font-bold tracking-tight text-white mb-4">
-              Acesse seu Radar
+              Acesse seu Radar Jóias
             </h2>
             <p className="text-[#8E9297] text-lg">
-              Dezenas de milhares de lotes foram processados pela nossa IA enquanto você estava fora.
+              Dezenas de milhares de peças foram processadas pela nossa IA enquanto você estava fora.
             </p>
           </div>
 
@@ -124,8 +124,8 @@ export default function LoginPage() {
                 <Target className="w-6 h-6 text-[#5865F2]" />
               </div>
               <div>
-                <h4 className="text-white font-bold">Meus Alertas Inteligentes</h4>
-                <p className="text-[#8E9297] text-sm mt-1">Verifique as correspondências que a IA encontrou para suas máquinas rastreadas hoje.</p>
+                <h4 className="text-white font-bold">Meus Alertas de Jóias</h4>
+                <p className="text-[#8E9297] text-sm mt-1">Verifique as correspondências que a IA encontrou para suas palavras-chave rastreadas hoje.</p>
               </div>
             </div>
 
@@ -135,7 +135,7 @@ export default function LoginPage() {
               </div>
               <div>
                 <h4 className="text-white font-bold">Radar Geográfico Atualizado</h4>
-                <p className="text-[#8E9297] text-sm mt-1">Novas zonas quentes logísticas apareceram no mapa de retirada. Planeje seus portes.</p>
+                <p className="text-[#8E9297] text-sm mt-1">Novas zonas quentes de joias apareceram no mapa. Planeje sua visita aos pickup locations.</p>
               </div>
             </div>
 
@@ -144,8 +144,8 @@ export default function LoginPage() {
                 <Brain className="w-6 h-6 text-[#10B981]" />
               </div>
               <div>
-                <h4 className="text-white font-bold">Novos Editais Lidos</h4>
-                <p className="text-[#8E9297] text-sm mt-1">Nossos Scrapers extraíram as pegadinhas e comissões dos pátios da Sodré e Freitas.</p>
+                <h4 className="text-white font-bold">Catálogos Atualizados</h4>
+                <p className="text-[#8E9297] text-sm mt-1">Nossos Scrapers detectaram novos lotes na Vitrine CAIXA. Atualize suas Estimates.</p>
               </div>
             </div>
           </div>
@@ -158,7 +158,7 @@ export default function LoginPage() {
 
           <div className="text-center md:text-left mb-8">
             <h3 className="text-2xl font-bold tracking-tight text-white mb-2">Bem-vindo de volta</h3>
-            <p className="text-[#8E9297]">Faça login para checar seus leilões rastreados.</p>
+            <p className="text-[#8E9297]">Faça login para checar suas jóias rastreadas.</p>
           </div>
 
           <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">

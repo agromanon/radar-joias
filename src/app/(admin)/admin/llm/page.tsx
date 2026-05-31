@@ -16,6 +16,7 @@ interface LLMProvider {
   priority: number;
   max_tokens: number;
   temperature: number;
+  task_type: "enrich" | "edital" | "results" | "chat";
   created_at: string;
 }
 
@@ -48,10 +49,11 @@ function ProviderModal({
           priority: modal.provider.priority,
           max_tokens: modal.provider.max_tokens,
           temperature: modal.provider.temperature,
+          task_type: modal.provider.task_type,
         }
       : {
           name: "",
-          provider_type: "anthropic" as const,
+          provider_type: "openai_compatible" as const,
           base_url: "",
           model: "",
           api_key: "",
@@ -60,6 +62,7 @@ function ProviderModal({
           priority: 0,
           max_tokens: 4096,
           temperature: 0.7,
+          task_type: "enrich" as const,
         }
   );
 
@@ -221,6 +224,23 @@ function ProviderModal({
             />
           </div>
 
+          {/* Task Type */}
+          <div>
+            <label className="text-[#8E9297] text-[10px] font-bold uppercase tracking-widest block mb-2">Tipo de Tarefa</label>
+            <select
+              value={formData.task_type}
+              onChange={(e) => setFormData({ ...formData, task_type: e.target.value as any })}
+              className="w-full bg-[#0B0E14] border border-[#272A31] text-white rounded-xl py-3 px-4 focus:outline-none focus:ring-2 focus:ring-[#5865F2]/50"
+              required
+            >
+              <option value="enrich">Enriquecimento de lotes (descriptions, extração de metadados)</option>
+              <option value="edital">Extração de Edital (regras, prazos, formas de pagamento)</option>
+              <option value="results">Resultados de leilão (lances, preços finais)</option>
+              <option value="chat">Concierge (chat com ferramentas de busca e recomendação)</option>
+            </select>
+            <p className="text-[#454655] text-[11px] mt-1">Cada tarefa pode ter seu próprio provedor/modelo otimizado</p>
+          </div>
+
           {/* Toggles */}
           <div className="flex gap-4">
             <label className="flex items-center gap-2 cursor-pointer">
@@ -362,6 +382,17 @@ export default function LLMConfigPage() {
     return <span className="text-[#EF4444] text-[10px] font-bold uppercase tracking-widest">Custo: Alto</span>;
   };
 
+  const getTaskBadge = (taskType: string) => {
+    const map: Record<string, { label: string; color: string }> = {
+      enrich: { label: "ENRIQUECIMENTO", color: "text-[#10B981]" },
+      edilal: { label: "EDITAL", color: "text-[#5865F2]" },
+      results: { label: "RESULTADOS", color: "text-[#F59E0B]" },
+      chat: { label: "CONCIERGE", color: "text-[#EC4899]" },
+    };
+    const cfg = map[taskType] ?? { label: taskType.toUpperCase(), color: "text-[#8E9297]" };
+    return <span className={`text-[10px] font-bold ${cfg.color}`}>{cfg.label}</span>;
+  };
+
   return (
     <div className="max-w-6xl mx-auto space-y-8 animate-in fade-in duration-500">
       {modal && <ProviderModal modal={modal} onClose={() => setModal(null)} onSave={handleSave} />}
@@ -413,6 +444,7 @@ export default function LLMConfigPage() {
                         <span className="px-2 py-0.5 bg-[#F59E0B]/10 text-[#F59E0B] text-[10px] font-bold rounded-full">FALLBACK</span>
                       )}
                       {getProviderBadge(provider)}
+                      {getTaskBadge(provider.task_type)}
                     </div>
                     <div className="flex items-center gap-4 text-[#8E9297] text-xs">
                       <span className="font-mono">{provider.model}</span>

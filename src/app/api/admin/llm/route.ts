@@ -118,10 +118,14 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json()
-    const { name, provider_type, base_url, model, api_key, is_active, is_fallback, priority, max_tokens, temperature } = body
+    const { name, provider_type, base_url, model, api_key, is_active, is_fallback, priority, max_tokens, temperature, task_type } = body
 
     if (!name || !provider_type || !model || !api_key) {
       return NextResponse.json({ error: 'Name, provider type, model, and API key are required' }, { status: 400 })
+    }
+
+    if (task_type && !['enrich', 'edital', 'results', 'chat'].includes(task_type)) {
+      return NextResponse.json({ error: 'task_type must be one of: enrich, edilal, results, chat' }, { status: 400 })
     }
 
     // Use service role key for creating provider
@@ -143,6 +147,7 @@ export async function POST(request: NextRequest) {
         priority: priority ?? 0,
         max_tokens: max_tokens || 4096,
         temperature: temperature || 0.7,
+        task_type: task_type || 'enrich',
       })
       .select()
       .single()
@@ -207,6 +212,10 @@ export async function PATCH(request: NextRequest) {
 
     if (!providerId) {
       return NextResponse.json({ error: 'Provider ID is required' }, { status: 400 })
+    }
+
+    if (updateData.task_type && !['enrich', 'edital', 'results', 'chat'].includes(updateData.task_type)) {
+      return NextResponse.json({ error: 'task_type must be one of: enrich, edilal, results, chat' }, { status: 400 })
     }
 
     // Use service role key for updating provider

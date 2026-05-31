@@ -157,6 +157,97 @@ export async function POST(request: NextRequest) {
 }
 
 /**
+ * PATCH /api/watchlist
+ * Bulk operations on user's watchlist
+ *
+ * Body:
+ * - action: "add_bulk" | "remove_bulk"
+ * - lot_ids: number[] (required for bulk)
+ */
+export async function PATCH(request: NextRequest) {
+  try {
+    const user = await getServerUser();
+
+    if (!user) {
+      return NextResponse.json(
+        { error: "Unauthorized - authentication required" },
+        { status: 401 }
+      );
+    }
+
+    const supabase = await createServerClient();
+    const body = await request.json();
+
+    if (!body.action || !body.lot_ids || !Array.isArray(body.lot_ids)) {
+      return NextResponse.json(
+        { error: "Missing required fields: action and lot_ids[]" },
+        { status: 400 }
+      );
+    }
+
+    if (body.action === "remove_bulk") {
+      const { error } = await supabase
+        .from("watchlist")
+        .delete()
+        .eq("user_id", user.id)
+        .in("lot_id", body.lot_ids);
+
+      if (error) {
+        console.error("Error bulk removing from watchlist:", error);
+        return NextResponse.json(
+          { error: "Failed to remove from watchlist", details: error.message },
+          { status: 500 }
+        );
+      }
+
+      return NextResponse.json({ success: true, removed: body.lot_ids.length });
+    }
+
+    if (body.action === "add_bulk") {
+      const existing = await supabase
+        .from("watchlist")
+        .select("lot_id")
+        .eq("user_id", user.id)
+        .in("lot_id", body.lot_ids);
+
+      const existingIds = (existing.data || []).map((w: any) => w.lot_id);
+      const newIds = body.lot_ids.filter((id: number) => !existingIds.includes(id));
+
+      if (newIds.length === 0) {
+        return NextResponse.json({ added: 0, skipped: body.lot_ids.length, message: "All lots already in watchlist" });
+      }
+
+      const items = newIds.map((lot_id: number) => ({
+        user_id: user.id,
+        lot_id,
+      }));
+
+      const { error } = await supabase
+        .from("watchlist")
+        .insert(items);
+
+      if (error) {
+        console.error("Error bulk adding to watchlist:", error);
+        return NextResponse.json(
+          { error: "Failed to add to watchlist", details: error.message },
+          { status: 500 }
+        );
+      }
+
+      return NextResponse.json({ added: newIds.length, skipped: body.lot_ids.length - newIds.length });
+    }
+
+    return NextResponse.json({ error: "Invalid action" }, { status: 400 });
+  } catch (error) {
+    console.error("Error in watchlist API PATCH:", error);
+    return NextResponse.json(
+      { error: "Internal server error" },
+      { status: 500 }
+    );
+  }
+}
+
+/**
  * DELETE /api/watchlist
  * Remove a lot from user's watchlist
  *

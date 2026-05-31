@@ -1,0 +1,506 @@
+"use client";
+
+import Link from "next/link";
+import { useState, useEffect } from "react";
+import { Search, SlidersHorizontal, Clock, MapPin, X, Filter, Gem, TrendingUp, AlertTriangle, Star, CheckSquare, Square, Loader2 } from "lucide-react";
+import { createClient } from "@/lib/supabase";
+import { useUser } from "@/hooks/useUser";
+
+// CAIXA changed image URL base from /vitrinedejoias to /vitrinearquivos/fotos
+function fixImageUrl(url: string): string {
+  if (url.includes('servicebus2.caixa.gov.br/vitrinedejoias/')) {
+    return url.replace('servicebus2.caixa.gov.br/vitrinedejoias/', 'servicebus2.caixa.gov.br/vitrinearquivos/fotos/');
+  }
+  return url;
+}
+
+type Lot = {
+  id: number;
+  lot_number: string;
+  de_contrato: string;
+  peso_lote: string;
+  valor: number;
+  url_imagem_capa: string;
+  imagem_capa_url: string | null;
+  sg_uf: string;
+  co_leilao: string;
+  outcome_status: string;
+  winning_bid_value: number;
+  centralizer_name: string;
+  cities?: any;
+  auctions?: any;
+  // Enriched fields (from LLM)
+  title_enriched?: string | null;
+  description_enriched?: string | null;
+  karat_enriched?: string | null;
+  category_enriched?: string | null;
+  weight_enriched?: number | null;
+  tags?: string[] | null;
+  // Legacy condition flags
+  has_enchimento?: boolean;
+  has_low_karat?: boolean;
+  has_unvalued_stones?: boolean;
+  is_watch_stopped?: boolean;
+  is_broken?: boolean;
+  is_incomplete?: boolean;
+  is_damaged?: boolean;
+  has_mixed_metals?: boolean;
+  is_folheado?: boolean;
+  has_rhodium_plating?: boolean;
+  is_coin?: boolean;
+  is_bar?: boolean;
+  is_watch?: boolean;
+  is_montblanc_pen?: boolean;
+  karat?: string;
+  category?: string;
+};
+
+// Derive condition flags from tags array
+function flagsFromTags(tags: string[] | null | undefined) {
+  if (!tags) return {};
+  const tagSet = new Set(tags.map(t => t.toLowerCase()));
+  return {
+    has_enchimento: tagSet.has('enchimento'),
+    has_low_karat: tagSet.has('baixo-karat') || tagSet.has('ouro-baixo'),
+    has_unvalued_stones: tagSet.has('pedras-nao-valorizadas'),
+    is_watch_stopped: tagSet.has('relogio-parado'),
+    is_broken: tagSet.has('quebrado') || tagSet.has('partido'),
+    is_incomplete: tagSet.has('incompleto') || tagSet.has('falta'),
+    is_damaged: tagSet.has('amassado') || tagSet.has('amolgado') || tagSet.has('com-defeito'),
+    has_mixed_metals: tagSet.has('metais-mistos') || tagSet.has('residuo-cobre'),
+    is_folheado: tagSet.has('folheado'),
+    has_rhodium_plating: tagSet.has('ouro-rodinado'),
+    is_coin: tagSet.has('moeda'),
+    is_bar: tagSet.has('barra'),
+    is_watch: tagSet.has('relogio'),
+  };
+}
+
+function formatPrice(price: number | null | undefined): string {
+  if (!price || Number.isNaN(price)) return "R$ --";
+  return new Intl.NumberFormat("pt-BR", {
+    style: "currency",
+    currency: "BRL",
+    maximumFractionDigits: 0,
+  }).format(price);
+}
+
+function getJewelryType(description: string | null): string {
+  if (!description) return "Joia";
+  const d = description.toLowerCase();
+  if (d.includes("aliança")) return "Aliança";
+  if (d.includes("colar")) return "Colar";
+  if (d.includes("brinco")) return "Brinco";
+  if (d.includes("anel")) return "Anel";
+  if (d.includes("pulseira")) return "Pulseira";
+  if (d.includes("relógio") || d.includes("watch")) return "Relógio";
+  if (d.includes("moeda")) return "Moeda";
+  if (d.includes("barra")) return "Barra";
+  if (d.includes("ouro 18")) return "Ouro 18k";
+  if (d.includes("ouro 14")) return "Ouro 14k";
+  if (d.includes("prata")) return "Prata";
+  return "Joia";
+}
+
+function CountdownTimer({ endDate }: { endDate: string }) {
+  const [timeLeft, setTimeLeft] = useState("");
+
+  useEffect(() => {
+    const calculate = () => {
+      const end = new Date(endDate);
+      const now = new Date();
+      const diff = end.getTime() - now.getTime();
+      if (diff <= 0) return "Encerrado";
+      const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+      const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+      const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+      if (days > 0) return `${days}d ${hours}h`;
+      if (hours > 0) return `${hours}h ${minutes}m`;
+      return `${minutes}m`;
+    };
+    setTimeLeft(calculate());
+    const interval = setInterval(() => setTimeLeft(calculate()), 60_000);
+    return () => clearInterval(interval);
+  }, [endDate]);
+
+  const isUrgent = timeLeft.includes("h") && !timeLeft.includes("d");
+  return (
+    <span className={`flex items-center gap-1 text-xs font-medium ${
+      timeLeft === "Encerrado" ? "text-red-500" : isUrgent ? "text-amber-500" : "text-[#8E9297]"
+    }`}>
+      <Clock className="w-3 h-3" />
+      {timeLeft}
+    </span>
+  );
+}
+
+export default function LeiloesPage() {
+  const [lots, setLots] = useState<Lot[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [showFilters, setShowFilters] = useState(false);
+  const [selectedState, setSelectedState] = useState<string>("");
+  const [selectedKarat, setSelectedKarat] = useState<string>("");
+  const [selectedCategory, setSelectedCategory] = useState<string>("");
+  const [maxPrice, setMaxPrice] = useState<string>("");
+  const [sortBy, setSortBy] = useState<string>("bid_end");
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 24;
+  const [pagination, setPagination] = useState({ total: 0, totalPages: 0 });
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkAction, setBulkAction] = useState<"idle" | "adding">("idle");
+
+  const { user } = useUser();
+  const supabase = createClient();
+
+  useEffect(() => {
+    fetchLots();
+  }, [selectedState, selectedKarat, selectedCategory, maxPrice, sortBy, searchQuery, page]);
+
+  async function fetchLots() {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      params.set('leiloes', 'true');
+      params.set('page', page.toString());
+      params.set('limit', PAGE_SIZE.toString());
+      params.set('order', sortBy === 'price_asc' ? 'valor.asc' : sortBy === 'price_desc' ? 'valor.desc' : 'id.desc');
+      if (searchQuery) params.set('search', searchQuery);
+      if (selectedState) params.set('state', selectedState);
+      if (selectedKarat) params.set('karat', selectedKarat);
+      if (selectedCategory) params.set('category', selectedCategory);
+      if (maxPrice) params.set('max_bid', maxPrice);
+
+      const res = await fetch(`/api/lots?${params.toString()}`, { cache: 'no-store' });
+      const result = await res.json();
+      if (!res.ok) console.error("Error:", result);
+      else { setLots(result.lots ?? []); setPagination(result.pagination ?? { total: 0, totalPages: 1 }); }
+    } catch (e) { console.error(e); }
+    finally { setLoading(false); }
+  }
+
+  function clearFilters() {
+    setSelectedState("");
+    setSelectedKarat("");
+    setSelectedCategory("");
+    setMaxPrice("");
+    setSearchQuery("");
+    setPage(1);
+  }
+
+  function toggleSelect(id: number) {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function selectAll() {
+    if (selectedIds.size === lots.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(lots.map(l => l.id)));
+    }
+  }
+
+  async function bulkAddToWatchlist() {
+    if (!user || selectedIds.size === 0) return;
+    setBulkAction("adding");
+    try {
+      const ids = Array.from(selectedIds);
+      const res = await fetch("/api/watchlist", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "add_bulk", lot_ids: ids }),
+      });
+      if (res.ok) {
+        setSelectedIds(new Set());
+      }
+    } catch (e) {
+      console.error("Bulk add failed:", e);
+    } finally {
+      setBulkAction("idle");
+    }
+  }
+
+  const flagIcons = [
+    { key: "has_enchimento", label: "Enchimento", bg: "bg-amber-600 text-white" },
+    { key: "has_low_karat", label: "Baixo Karat", bg: "bg-orange-600 text-white" },
+    { key: "has_unvalued_stones", label: "Pedras não precificadas", bg: "bg-pink-600 text-white" },
+    { key: "is_watch_stopped", label: "Relógio parado", bg: "bg-red-600 text-white" },
+    { key: "is_broken", label: "Quebrado", bg: "bg-red-700 text-white" },
+    { key: "is_incomplete", label: "Incompleto", bg: "bg-red-800 text-white" },
+    { key: "is_damaged", label: "Danificado", bg: "bg-yellow-600 text-white" },
+    { key: "is_folheado", label: "Folheado", bg: "bg-teal-600 text-white" },
+    { key: "has_mixed_metals", label: "Metais mistos", bg: "bg-blue-600 text-white" },
+    { key: "has_rhodium_plating", label: "Ouro rodinado", bg: "bg-purple-600 text-white" },
+  ];
+
+  function shortTitle(description: string | null, jewelryType: string): string {
+    if (!description) return jewelryType;
+    return description.length > 45 ? description.slice(0, 42).trimEnd() + "…" : description;
+  }
+
+  return (
+    <div className="min-h-full p-6 md:p-10 max-w-7xl mx-auto">
+      {/* Search Header */}
+      <header className="mb-8">
+        <h1 className="text-3xl font-black text-white mb-2">Leilões Disponíveis</h1>
+        <p className="text-[#8E9297] text-sm mb-6">Encontre oportunidades de compra em leilões futuros da CAIXA</p>
+        <div className="flex gap-3">
+          <div className="flex-1 relative">
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-[#8E9297]" />
+            <input
+              type="text"
+              placeholder="Buscar ouro, aliança, colar..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && fetchLots()}
+              className="w-full bg-[#151A22] border border-[#272A31] text-white rounded-full py-3 pl-12 pr-4 focus:outline-none focus:ring-2 focus:ring-[#5865F2]"
+            />
+          </div>
+          <button
+            onClick={() => setShowFilters(!showFilters)}
+            className={`flex items-center gap-2 px-4 py-3 rounded-2xl font-bold transition-all ${showFilters ? 'bg-[#5865F2] text-white' : 'bg-[#151A22] border border-[#272A31] text-white hover:bg-[#2F3136]'}`}
+          >
+            <SlidersHorizontal className="w-5 h-5" />
+            {showFilters ? 'Fechar' : 'Filtros'}
+            {(selectedState || selectedKarat || selectedCategory || maxPrice) && (
+              <span className="w-2 h-2 rounded-full bg-[#5865F2]"></span>
+            )}
+          </button>
+        </div>
+
+        {/* Expandable Filters Bar */}
+        {showFilters && (
+          <div className="bg-[#151A22] border border-[#272A31] rounded-2xl p-4 mb-6">
+            <div className="flex flex-wrap gap-4">
+              <div className="flex flex-col gap-1">
+                <label className="text-[#8E9297] text-[10px] font-bold uppercase">Estado</label>
+                <select
+                  value={selectedState}
+                  onChange={(e) => { setSelectedState(e.target.value); setPage(1); }}
+                  className="bg-[#0B0E14] border border-[#272A31] text-white rounded-xl py-2 px-3 text-sm min-w-[100px]"
+                >
+                  <option value="">Todos</option>
+                  {["SP","RJ","MG","RS","PR","BA","GO","DF","PA","SC","PE","CE","MT","ES","AM","RN","PB","AL","RO","PI","MS","MA","SE","TO","AP","RR","AC"].map(uf => (
+                    <option key={uf} value={uf}>{uf}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[#8E9297] text-[10px] font-bold uppercase">Karatagem</label>
+                <select
+                  value={selectedKarat}
+                  onChange={(e) => { setSelectedKarat(e.target.value); setPage(1); }}
+                  className="bg-[#0B0E14] border border-[#272A31] text-white rounded-xl py-2 px-3 text-sm min-w-[120px]"
+                >
+                  <option value="">Todas</option>
+                  <option value="18k">Ouro 18k</option>
+                  <option value="14k">Ouro 14k</option>
+                  <option value="10k">Ouro 10k</option>
+                </select>
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[#8E9297] text-[10px] font-bold uppercase">Lance Máximo (R$)</label>
+                <input
+                  type="number"
+                  value={maxPrice}
+                  onChange={(e) => { setMaxPrice(e.target.value); setPage(1); }}
+                  placeholder="Ex: 5000"
+                  className="bg-[#0B0E14] border border-[#272A31] text-white rounded-xl py-2 px-3 text-sm w-[120px]"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[#8E9297] text-[10px] font-bold uppercase">Ordenar</label>
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value)}
+                  className="bg-[#0B0E14] border border-[#272A31] text-white rounded-xl py-2 px-3 text-sm min-w-[160px]"
+                >
+                  <option value="bid_end">Encerramento mais cedo</option>
+                  <option value="price_asc">Menor preço</option>
+                  <option value="price_desc">Maior preço</option>
+                </select>
+              </div>
+              {(selectedState || selectedKarat || selectedCategory || maxPrice) && (
+                <button
+                  onClick={() => { setSelectedState(""); setSelectedKarat(""); setSelectedCategory(""); setMaxPrice(""); setPage(1); }}
+                  className="self-end px-4 py-2 bg-[#2F3136] hover:bg-[#454655] text-white rounded-xl text-sm font-semibold transition-colors"
+                >
+                  Limpar
+                </button>
+              )}
+            </div>
+            {(selectedState || selectedKarat || selectedCategory || maxPrice) && (
+              <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t border-[#272A31]">
+                {selectedState && <span className="text-xs bg-[#5865F2]/20 text-[#5865F2] px-3 py-1 rounded-full">UF: {selectedState}</span>}
+                {selectedKarat && <span className="text-xs bg-[#5865F2]/20 text-[#5865F2] px-3 py-1 rounded-full">Karat: {selectedKarat}</span>}
+                {maxPrice && <span className="text-xs bg-[#5865F2]/20 text-[#5865F2] px-3 py-1 rounded-full">Até R$ {Number(maxPrice).toLocaleString('pt-BR')}</span>}
+              </div>
+            )}
+          </div>
+        )}
+
+      {/* Quick stats */}
+      <div className="grid grid-cols-3 gap-4 mb-8">
+        <div className="bg-[#151A22] border border-[#272A31] rounded-2xl p-4">
+          <div className="text-[#8E9297] text-xs font-bold uppercase mb-1">Total de Lotes</div>
+          <div className="text-2xl font-black text-white">{Number(pagination.total).toLocaleString('pt-BR')}</div>
+        </div>
+        <div className="bg-[#151A22] border border-[#272A31] rounded-2xl p-4">
+          <div className="text-[#8E9297] text-xs font-bold uppercase mb-1">Menor Lance</div>
+          <div className="text-2xl font-black text-[#10B981]">{formatPrice(lots.length > 0 ? Math.min(...lots.map((l: any) => Number(l.valor) || 0)) : null)}</div>
+        </div>
+        <div className="bg-[#151A22] border border-[#272A31] rounded-2xl p-4">
+          <div className="text-[#8E9297] text-xs font-bold uppercase mb-1">Maior Lance</div>
+          <div className="text-2xl font-black text-white">{formatPrice(lots.length > 0 ? Math.max(...lots.map((l: any) => Number(l.valor) || 0)) : null)}</div>
+        </div>
+      </div>
+
+      {/* Bulk action bar */}
+      {user && (
+        <div className="mb-6 flex items-center gap-3">
+          <button
+            onClick={selectAll}
+            className="flex items-center gap-2 text-sm text-[#8E9297] hover:text-white transition-colors"
+          >
+            {selectedIds.size === lots.length && lots.length > 0 ? (
+              <CheckSquare className="w-4 h-4 text-[#5865F2]" />
+            ) : (
+              <Square className="w-4 h-4" />
+            )}
+            Selecionar todos ({lots.length})
+          </button>
+          {selectedIds.size > 0 && (
+            <div className="flex items-center gap-3 ml-auto">
+              <span className="text-sm text-[#8E9297]">{selectedIds.size} selecionado{selectedIds.size !== 1 ? "s" : ""}</span>
+              <button
+                onClick={bulkAddToWatchlist}
+                disabled={bulkAction === "adding"}
+                className="flex items-center gap-2 bg-[#5865F2] hover:bg-[#4752C4] disabled:opacity-50 text-white px-4 py-2 rounded-xl text-sm font-bold transition-colors"
+              >
+                {bulkAction === "adding" ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Star className="w-4 h-4" />
+                )}
+                Salvar na Watchlist
+              </button>
+              <button
+                onClick={() => setSelectedIds(new Set())}
+                className="text-[#8E9297] hover:text-white text-sm"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Grid */}
+      {loading ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+          {[...Array(8)].map((_, i) => (
+            <div key={i} className="bg-[#151A22] rounded-3xl overflow-hidden border border-[#272A31] animate-pulse">
+              <div className="aspect-square bg-[#0B0E14]" />
+              <div className="p-5 space-y-3"><div className="h-4 bg-[#272A31] rounded w-3/4" /><div className="h-6 bg-[#272A31] rounded w-1/2" /></div>
+            </div>
+          ))}
+        </div>
+      ) : lots.length > 0 ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+          {lots.map((lot) => {
+            const title = lot.title_enriched || shortTitle(lot.de_contrato, getJewelryType(lot.de_contrato));
+            const categoryBadge = lot.category_enriched || getJewelryType(lot.de_contrato);
+            const karat = lot.karat_enriched || lot.karat;
+            const stateUf = lot.sg_uf;
+            const auction = (lot.auctions as any);
+            const bidEndDate = auction?.bid_end_date;
+            const tagFlags = flagsFromTags(lot.tags);
+            const activeFlags = flagIcons.filter(f => (lot as any)[f.key] || tagFlags[f.key as keyof typeof tagFlags]);
+
+            return (
+              <div
+                key={lot.id}
+                className="group relative flex flex-col bg-[#151A22] rounded-3xl overflow-hidden border border-[#272A31] hover:border-[#454655] hover:shadow-2xl transition-all"
+              >
+                {/* Checkbox overlay */}
+                {user && (
+                  <button
+                    onClick={(e) => {
+                      e.preventDefault();
+                      toggleSelect(lot.id);
+                    }}
+                    className="absolute top-3 left-3 z-10 p-1 bg-[#0B0E14]/80 rounded-lg backdrop-blur-sm"
+                  >
+                    {selectedIds.has(lot.id) ? (
+                      <CheckSquare className="w-5 h-5 text-[#5865F2]" />
+                    ) : (
+                      <Square className="w-5 h-5 text-white/60" />
+                    )}
+                  </button>
+                )}
+                <Link href={`/lote/${lot.id}`} className="block">
+                <div className="aspect-square relative bg-[#0B0E14]">
+                  {lot.imagem_capa_url ? (
+                    <img src={lot.imagem_capa_url} alt={title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
+                  ) : lot.url_imagem_capa ? (
+                    <img src={fixImageUrl(lot.url_imagem_capa)} alt={title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center"><Gem className="w-16 h-16 text-[#2F3136]" /></div>
+                  )}
+                  <span className="absolute top-3 left-12 px-2.5 py-1 rounded-full text-[10px] font-bold bg-[#5865F2] text-white">{categoryBadge}</span>
+                  {bidEndDate && <span className="absolute top-3 right-3 px-2 py-1 rounded-full text-[10px] font-bold bg-[#0B0E14]/90 text-white"><CountdownTimer endDate={bidEndDate} /></span>}
+                </div>
+                <div className="p-4 flex flex-col flex-1 gap-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1 text-[10px] text-[#8E9297]">
+                      <MapPin className="w-3 h-3" />
+                      {stateUf ?? "—"}
+                    </div>
+                    {karat && (
+                      <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-[#F59E0B] text-white">
+                        {karat}
+                      </span>
+                    )}
+                  </div>
+                  <h3 className="text-sm font-semibold text-white leading-snug line-clamp-2">{title}</h3>
+                  {activeFlags.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {activeFlags.slice(0, 2).map(f => (
+                        <span key={f.key} className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${f.bg}`}>{f.label}</span>
+                      ))}
+                      {activeFlags.length > 2 && <span className="text-[10px] text-[#8E9297] px-1">+{activeFlags.length - 2}</span>}
+                    </div>
+                  )}
+                  <div className="mt-auto pt-3 border-t border-[#272A31]">
+                    <div className="text-[10px] text-[#8E9297] mb-0.5">Lance Inicial</div>
+                    <div className="text-xl font-black text-white">{formatPrice(lot.valor)}</div>
+                  </div>
+                </div>
+              </Link>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="text-center py-20">
+          <p className="text-[#8E9297] text-lg mb-2">Nenhum lote encontrado</p>
+          <button onClick={clearFilters} className="text-[#5865F2] hover:underline text-sm font-semibold">Limpar filtros</button>
+        </div>
+      )}
+
+      {/* Pagination */}
+      {pagination.totalPages > 1 && (
+        <div className="mt-12 flex items-center justify-center gap-4">
+          <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} className="px-4 py-2 bg-[#151A22] border border-[#272A31] hover:bg-[#2F3136] text-white rounded-xl font-semibold disabled:opacity-50">← Anterior</button>
+          <span className="text-white text-sm">Página {page} de {pagination.totalPages}</span>
+          <button onClick={() => setPage(p => Math.min(pagination.totalPages, p + 1))} disabled={page === pagination.totalPages} className="px-4 py-2 bg-[#151A22] border border-[#272A31] hover:bg-[#2F3136] text-white rounded-xl font-semibold disabled:opacity-50">Próxima →</button>
+        </div>
+      )}
+    </div>
+  );
+}

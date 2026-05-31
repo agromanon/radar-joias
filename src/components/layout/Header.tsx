@@ -2,7 +2,8 @@
 
 import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
-import { Bell, Search, Menu, Target, Zap, CheckCircle2, X, ChevronDown, Settings, Shield, LogOut } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Bell, Search, Menu, Target, Zap, CheckCircle2, X, ChevronDown, Settings, Shield, LogOut, Gem, ExternalLink, MapPin, Star, TrendingUp, Users } from "lucide-react";
 import { useSidebar } from "./SidebarContext";
 
 const NOTIFICATIONS = [
@@ -46,11 +47,14 @@ import { useUser } from "@/hooks/useUser";
 export function Header() {
   const { user, signOut } = useUser();
   const { setOpen } = useSidebar();
+  const router = useRouter();
   const [notifOpen, setNotifOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [notifications, setNotifications] = useState(NOTIFICATIONS);
   const [isMac, setIsMac] = useState(true);
   const [isSigningOut, setIsSigningOut] = useState(false);
+  const [cmdOpen, setCmdOpen] = useState(false);
+  const [cmdQuery, setCmdQuery] = useState("");
   const panelRef = useRef<HTMLDivElement>(null);
   const userMenuRef = useRef<HTMLDivElement>(null);
 
@@ -60,7 +64,20 @@ export function Header() {
     setIsMac(navigator.platform.toUpperCase().indexOf('MAC') >= 0);
   }, []);
 
-  // Close on outside click
+  // ⌘K / Ctrl+K command palette
+  useEffect(() => {
+    function handler(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        setCmdOpen(true);
+      }
+      if (e.key === 'Escape') setCmdOpen(false);
+    }
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, []);
+
+  // Close cmd palette on outside click
   useEffect(() => {
     function handler(e: MouseEvent) {
       if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
@@ -90,9 +107,9 @@ export function Header() {
           <Menu className="w-5 h-5" />
         </button>
 
-        <Link href="/dashboard" className="md:hidden flex items-center gap-1.5 text-white font-bold text-lg tracking-tight hover:opacity-80 transition-opacity whitespace-nowrap">
-          <Bell className="w-4 h-4 text-[#5865F2]" />
-          Radar<span className="text-[#5865F2]">Leilão</span>
+        <Link href="/leiloes" className="md:hidden flex items-center gap-1.5 text-white font-bold text-lg tracking-tight hover:opacity-80 transition-opacity whitespace-nowrap">
+          <Gem className="w-4 h-4 text-[#5865F2]" />
+          Radar<span className="text-[#5865F2]">Jóias</span>
         </Link>
 
         <div className="hidden md:flex items-center text-[#8E9297] text-sm hover:text-white cursor-pointer transition-colors h-full">
@@ -302,6 +319,72 @@ export function Header() {
           </div>
         )}
       </div>
+
+      {/* Command Palette (⌘K) */}
+      {cmdOpen && (
+        <div className="fixed inset-0 z-[100] flex items-start justify-center pt-[20vh]" onClick={() => setCmdOpen(false)}>
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" />
+          <div
+            className="relative w-full max-w-lg bg-[#151A22] border border-[#272A31] rounded-2xl shadow-2xl shadow-black/60 overflow-hidden"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Search input */}
+            <div className="flex items-center gap-3 px-5 py-4 border-b border-[#272A31]">
+              <Search className="w-5 h-5 text-[#8E9297] shrink-0" />
+              <input
+                autoFocus
+                value={cmdQuery}
+                onChange={e => setCmdQuery(e.target.value)}
+                placeholder="Buscar lotes, navegar para páginas..."
+                className="flex-1 bg-transparent text-white text-sm outline-none placeholder:text-[#454655]"
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && cmdQuery.trim()) {
+                    router.push(`/leiloes?q=${encodeURIComponent(cmdQuery.trim())}`);
+                    setCmdOpen(false);
+                    setCmdQuery('');
+                  }
+                }}
+              />
+              <kbd className="bg-[#2F3136] text-[#8E9297] text-[10px] px-1.5 py-0.5 rounded">ESC</kbd>
+            </div>
+
+            {/* Quick links */}
+            <div className="p-2">
+              <p className="text-[#454655] text-[10px] font-bold uppercase px-3 py-2">Navegação</p>
+              {[
+                { label: "Leilões Ativos", href: "/leiloes", icon: Target },
+                { label: "Vendas Realizadas", href: "/vendas", icon: TrendingUp },
+                { label: "Mapa do Brasil", href: "/mapa", icon: MapPin },
+                { label: "Meus Alertas", href: "/alertas", icon: Zap },
+                { label: "Watchlist", href: "/watchlist", icon: Star },
+                { label: "War Room", href: "/equipe", icon: Users },
+              ].map(item => (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  onClick={() => { setCmdOpen(false); setCmdQuery(''); }}
+                  className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-[#2F3136] transition-colors group"
+                >
+                  <item.icon className="w-4 h-4 text-[#8E9297] group-hover:text-white" />
+                  <span className="text-sm text-[#8E9297] group-hover:text-white">{item.label}</span>
+                </Link>
+              ))}
+            </div>
+
+            <div className="border-t border-[#272A31] p-2">
+              <p className="text-[#454655] text-[10px] font-bold uppercase px-3 py-2">Ações</p>
+              <button
+                onClick={() => { setCmdOpen(false); setCmdQuery(''); }}
+                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-[#2F3136] transition-colors text-left"
+              >
+                <ExternalLink className="w-4 h-4 text-[#8E9297]" />
+                <span className="text-sm text-[#8E9297]">Buscar no catálogo</span>
+                <kbd className="ml-auto bg-[#2F3136] text-[#454655] text-[9px] px-1.5 py-0.5 rounded">↵</kbd>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </header>
   );
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { Suspense, useState, useEffect, useRef } from "react";
 import { useSearchParams, usePathname } from "next/navigation";
 import { Navigation } from "lucide-react";
 import BrazilMap from "@/components/map/BrazilMap";
@@ -17,7 +17,7 @@ interface StateStats {
 let lastMapaVisitTime = Date.now();
 let hasJustLoaded = true;
 
-export default function MapaPage() {
+function MapaContent() {
   const [stateStats, setStateStats] = useState<StateStats[]>([]);
   const [mapKey, setMapKey] = useState(0);
   const searchParams = useSearchParams();
@@ -91,12 +91,12 @@ export default function MapaPage() {
       if (response.ok) {
         const data = await response.json();
         const lots = data.lots || [];
-        const grouped = lots.reduce((acc: Record<string, number>, lot) => {
-          const state = lot.location_state || 'Outros';
+        const grouped: Record<string, number> = lots.reduce((acc: Record<string, number>, lot: any) => {
+          const state = lot.sg_uf || 'Outros';
           acc[state] = (acc[state] || 0) + 1;
           return acc;
         }, {});
-        const stats = Object.entries(grouped).map(([state, count]) => {
+        const stats = Object.entries(grouped).map(([state, count]: [string, number]) => {
           const maxCount = Math.max(...Object.values(grouped));
           const temp = Math.round((count / maxCount) * 100);
           let color = "text-[#5865F2]";
@@ -184,5 +184,13 @@ export default function MapaPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function MapaPage() {
+  return (
+    <Suspense fallback={<div className="p-10 text-white">Carregando mapa...</div>}>
+      <MapaContent />
+    </Suspense>
   );
 }

@@ -3,16 +3,18 @@
 import { useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Compass, Map as MapIcon, Target, Star, Settings, Bell, X, Sparkles } from "lucide-react";
+import { Compass, Map as MapIcon, Target, Star, Settings, Gem, X, Sparkles, TrendingUp, Gavel, Users } from "lucide-react";
 import { useSidebar } from "./SidebarContext";
 import { useWatchlist } from "@/contexts/WatchlistContext";
 
 const NAV_ITEMS = [
-  { href: "/copilot", icon: Sparkles, label: "Radar Copilot", badge: "Beta" },
-  { href: "/dashboard", icon: Compass, label: "Explorar Lotes" },
+  { href: "/copilot", icon: Sparkles, label: "Joias Copilot", badge: "Beta" },
+  { href: "/leiloes", icon: Gavel, label: "Leilões Ativos" },
+  { href: "/vendas", icon: TrendingUp, label: "Vendas Realizadas" },
   { href: "/mapa", icon: MapIcon, label: "Radar Geográfico" },
   { href: "/alertas", icon: Target, label: "Meus Alertas", count: true },
   { href: "/watchlist", icon: Star, label: "Lotes Salvos" },
+  { href: "/equipe", icon: Users, label: "War Room" },
 ];
 
 function SidebarContent({ onClose, watchlistCount }: { onClose?: () => void; watchlistCount: number }) {
@@ -22,9 +24,9 @@ function SidebarContent({ onClose, watchlistCount }: { onClose?: () => void; wat
     <div className="flex flex-col h-full bg-[#151A22]">
       {/* Logo Area - Matching Header exactly */}
       <div className="h-16 flex items-center justify-between px-6 border-b border-[#272A31] flex-shrink-0">
-        <Link href="/dashboard" className="flex items-center gap-2 text-white font-semibold text-xl tracking-tight hover:opacity-80 transition-opacity">
-          <Bell className="w-5 h-5 text-[#5865F2]" />
-          Radar<span className="text-[#5865F2]">Leilão</span>
+        <Link href="/leiloes" className="flex items-center gap-2 text-white font-semibold text-xl tracking-tight hover:opacity-80 transition-opacity">
+          <Gem className="w-5 h-5 text-[#5865F2]" />
+          Radar<span className="text-[#5865F2]">Jóias</span>
         </Link>
         {onClose && (
           <button

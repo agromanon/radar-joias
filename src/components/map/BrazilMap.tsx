@@ -11,6 +11,8 @@ interface LotHotspot {
   lng: number;
   count: number;
   lots: any[];
+  temp?: number;
+  color?: string;
 }
 
 export default function BrazilMap() {
@@ -77,8 +79,8 @@ export default function BrazilMap() {
       setLoading(true);
       console.log('[Map] Starting fetch, mountId:', mountId.current);
 
-      // Request all lots with high limit and explicit page
-      const response = await fetch('/api/lots?limit=100&page=1');
+      // Request all leiloes with high limit and explicit page
+      const response = await fetch('/api/lots?leiloes=true&limit=5000&page=1');
       if (response.ok) {
         const data = await response.json();
         const lots = data.lots || [];
@@ -109,7 +111,7 @@ export default function BrazilMap() {
         };
 
         // Group lots by state/city with normalization
-        const grouped = lots.reduce((acc: Record<string, LotHotspot>, lot) => {
+        const grouped = (lots as any[]).reduce((acc, lot) => {
           // Normalize: trim whitespace, handle undefined/null, ensure UTF-8
           const state = (lot.location_state || 'BR').toString().trim();
           const rawCity = (lot.location_city || 'Outros').toString().trim();
@@ -139,13 +141,13 @@ export default function BrazilMap() {
         }, {});
 
         console.log(`[Map] Grouped into ${Object.keys(grouped).length} locations`);
-        Object.entries(grouped).forEach(([key, value]) => {
+        Object.entries(grouped as Record<string, LotHotspot>).forEach(([key, value]: [string, LotHotspot]) => {
           console.log(`[Map] ${key}: ${value.lots.length} lots`);
         });
 
         // Convert to array and calculate temperature (count-based intensity)
-        const hotspotsArray = Object.values(grouped).map(spot => {
-          const maxCount = Math.max(...Object.values(grouped).map(s => s.count), 1); // Avoid division by zero
+        const hotspotsArray = (Object.values(grouped) as LotHotspot[]).map(spot => {
+          const maxCount = Math.max(...(Object.values(grouped) as LotHotspot[]).map((s: LotHotspot) => s.count), 1); // Avoid division by zero
           const temp = Math.round((spot.count / maxCount) * 100);
 
           // Color based on temperature
@@ -256,8 +258,6 @@ export default function BrazilMap() {
       bounceAtZoomLimits={false}
       zoomControl={false}
       attributionControl={false}
-      autoPan={false}
-      panOptions={{ animate: false, duration: 0, easeLinearity: 1 }}
       zoomAnimation={false}
       markerZoomAnimation={false}
       fadeAnimation={false}
@@ -283,7 +283,6 @@ export default function BrazilMap() {
           }}
         >
           <Popup
-            autoPan={false}
             closeButton={true}
             closeOnClick={false}
             autoClose={false}
