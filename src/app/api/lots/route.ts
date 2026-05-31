@@ -208,6 +208,18 @@ export async function GET(request: NextRequest) {
       const isCompleted = auction?.status === "COMPLETED" || lot.was_sold;
       const result_date = auction?.result_date || null;
 
+      // DEBUG
+      if (lot.id === 13152) {
+        console.log("DEBUG lot 13152:", {
+          auction_id: lot.auction_id,
+          auction,
+          isCompleted,
+          cityPeriod: bidPeriodsByCity[lot.city_id],
+          bid_end_auction,
+          result_date,
+        });
+      }
+
       // For completed auctions: use most recent past bid_period, or auction result_date
       // For active auctions: use nearest future bid_period
       let bid_end = bid_end_auction;
