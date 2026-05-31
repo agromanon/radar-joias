@@ -1,7 +1,5 @@
 "use client";
 
-export const dynamic = "force-dynamic";
-
 import Link from "next/link";
 import { useState, useEffect } from "react";
 import { Search, SlidersHorizontal, Clock, MapPin, ChevronDown, X, Filter, CheckCircle2, AlertCircle, Gem } from "lucide-react";
