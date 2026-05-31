@@ -47,7 +47,7 @@ export async function GET(request: NextRequest) {
       : "*";
     let query = svc
       .from("lots")
-      .select(selectCols, { count: "exact" });
+      .select(selectCols, { count: "estimated" });
 
     // Leiloes active auction filters
     if (leiloes) {
@@ -135,14 +135,16 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Get unique auctioneers for filter dropdown
-    const { data: auctioneers } = await svc
-      .from("lots")
-      .select("auctioneer")
-      .not("auctioneer", "is", null)
-      .order("auctioneer");
-
-    const uniqueAuctioneers = [...new Set(auctioneers?.map((a) => a.auctioneer) || [])];
+    // Get unique auctioneers for filter dropdown (only when no other filters active to avoid full table scan)
+    let uniqueAuctioneers: string[] = [];
+    const hasFilters = !!(category || state || karat || risk_score || min_bid || max_bid || min_weight || max_weight || search || idParam);
+    if (!hasFilters) {
+      const { data: auctioneers } = await svc
+        .from("lots")
+        .select("auctioneer")
+        .not("auctioneer", "is", null);
+      uniqueAuctioneers = [...new Set(auctioneers?.map((a: any) => a.auctioneer) || [])];
+    }
 
     // Get bid periods for the lot's city (include all recent, not just active)
     const cityIds = [...new Set((lots as any)?.map((l: any) => l.city_id).filter(Boolean) || [])];
