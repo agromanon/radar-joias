@@ -149,6 +149,7 @@ type SimilarLot = {
   karat: string;
   weight_enriched: number | null;
   imagem_capa_url: string | null;
+  tags?: string[] | null;
   cities?: any;
   auctions?: { result_date: string | null };
 };
@@ -258,10 +259,19 @@ export default function LotDetailPage() {
     if (!lotData.weight_enriched || lotData.weight_enriched <= 0) return;
     try {
       const w = lotData.weight_enriched;
-      // Use karat_enriched if available, fallback to karat, fallback to empty string (all karats)
-      const karat = lotData.karat_enriched || lotData.karat || "";
-      const karatParam = karat ? `karat=${karat}` : "";
-      const query = `/api/lots?vendas=true&${karatParam}&limit=300`;
+      // Detect silver lots: karat="silver" or tags contain "prata"
+      const isSilver = lotData.karat === "silver" || lotData.tags?.includes("prata");
+      // For silver lots use metal_tag="prata", for gold use karat, for unknown show all
+      let query = "";
+      if (isSilver) {
+        query = `/api/lots?vendas=true&metal_tag=prata&limit=300`;
+      } else if (lotData.karat_enriched || lotData.karat) {
+        const k = lotData.karat_enriched || lotData.karat;
+        if (k && k !== "silver") query = `/api/lots?vendas=true&karat=${k}&limit=300`;
+        else query = `/api/lots?vendas=true&limit=300`;
+      } else {
+        query = `/api/lots?vendas=true&limit=300`;
+      }
       const res = await fetch(query);
       if (!res.ok) return;
       const data = await res.json();
@@ -313,7 +323,15 @@ export default function LotDetailPage() {
   async function fetchSimilarLots(lotData: Lot) {
     if (!lotData.weight_enriched && !lotData.karat) return;
     try {
-      let query = `/api/lots?vendas=true&karat=${lotData.karat || ""}&limit=300`;
+      const isSilver = lotData.karat === "silver" || lotData.tags?.includes("prata");
+      let query = "";
+      if (isSilver) {
+        query = `/api/lots?vendas=true&metal_tag=prata&limit=300`;
+      } else if (lotData.karat) {
+        query = `/api/lots?vendas=true&karat=${lotData.karat}&limit=300`;
+      } else {
+        query = `/api/lots?vendas=true&limit=300`;
+      }
       const res = await fetch(query);
       if (!res.ok) return;
       const data = await res.json();
@@ -863,7 +881,7 @@ export default function LotDetailPage() {
                 </div>
                 {weight.value > 0 && (
                   <div className="bg-[#0B0E14] rounded-xl p-3 text-xs text-[#8E9297]">
-                    R$ {(marketStats.median / weight.value).toFixed(2)}/g médio para {lot.karat || "todas as quilatagens"}
+                    R$ {(marketStats.median / weight.value).toFixed(2)}/g médio para {metalType === "silver" ? "silver" : metalType === "platinum" ? "platinum" : metalType === "palladium" ? "palladium" : lot.karat || "todas as quilatagens"}
                   </div>
                 )}
                 <p className="text-[#454655] text-[10px] mt-3 leading-relaxed">* Baseado em {marketStats.count} vendas similares. Decisão de lance é de responsabilidade exclusiva do licitante.</p>
@@ -911,7 +929,14 @@ export default function LotDetailPage() {
                         )}
                         <div className="flex-1 min-w-0">
                           <p className="text-white text-sm font-medium truncate">{s.title_enriched || s.de_contrato}</p>
-                          <p className="text-[#8E9297] text-xs">{s.weight_enriched ? `${s.weight_enriched.toFixed(2)}g` : s.peso_lote} · {s.karat}</p>
+                          <p className="text-[#8E9297] text-xs">{s.weight_enriched ? `${s.weight_enriched.toFixed(2)}g` : s.peso_lote} · {(() => {
+                            const sTags = s.tags || [];
+                            const sTagSet = new Set(sTags.map((t: string) => t.toLowerCase()));
+                            if (sTagSet.has("prata") || sTagSet.has("prata-925") || sTagSet.has("prata-800")) return "silver";
+                            if (sTagSet.has("platina")) return "platinum";
+                            if (sTagSet.has("paladio") || sTagSet.has("paládio")) return "palladium";
+                            return s.karat || "gold";
+                          })()}</p>
                           {s.auctions?.result_date && (
                             <p className="text-[#8E9297] text-xs">Vendido em {new Date(s.auctions.result_date + "T12:00:00").toLocaleDateString("pt-BR")}</p>
                           )}

@@ -28,6 +28,7 @@ export async function GET(request: NextRequest) {
     const category = searchParams.get("category");
     const state = searchParams.get("state");
     const karat = searchParams.get("karat");
+    const metalTag = searchParams.get("metal_tag"); // "prata" or "ouro" for tag-based filtering
     const risk_score = searchParams.get("risk_score");
     const min_bid = searchParams.get("min_bid");
     const max_bid = searchParams.get("max_bid");
@@ -77,6 +78,11 @@ export async function GET(request: NextRequest) {
       } else {
         query = query.eq("karat", karat);
       }
+    }
+
+    // Tag-based metal filter: "prata" for silver, "ouro" for gold
+    if (metalTag) {
+      query = query.or(`tags.cs.{"${metalTag}"}`);
     }
 
     if (risk_score) {
@@ -146,12 +152,11 @@ export async function GET(request: NextRequest) {
       uniqueAuctioneers = [...new Set(auctioneers?.map((a: any) => a.auctioneer) || [])];
     }
 
-    // Get bid periods for the lot's city (include all recent, not just active)
-    // For leiloes/vendas, use auction's bid_start_date/bid_end_date directly when available
+    // Use auction's bid dates, fallback to result_date for completed auctions
     let lotsWithSourceUrl = (lots as any)?.map((lot: any) => {
       const auction = lot.auctions;
-      // Prefer auction's own bid dates (more accurate than city-wide bid_periods)
-      const bid_end = auction?.bid_end_date || null;
+      // Use bid_end_date if available, otherwise use result_date (for completed auctions)
+      const bid_end = auction?.bid_end_date || (auction?.status === "COMPLETED" ? auction?.result_date : null);
       const bid_start = auction?.bid_start_date || null;
       return {
         ...lot,
