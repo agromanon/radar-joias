@@ -87,21 +87,42 @@ async function curlFetch(url, proxyUrl, options = {}) {
 
   try {
     const result = execFileSync('curl', args, { encoding: 'utf-8' });
+    // Check if response is HTML (CAIXA blocking page or proxy error)
+    const trimmed = result.trim();
+    const isHtml = trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html') || trimmed.startsWith('<HTML');
+    if (isHtml) {
+      return {
+        ok: false,
+        status: 403,
+        text: () => Promise.resolve(trimmed),
+        json: () => Promise.reject(new Error('HTML response (blocked)')),
+      };
+    }
+    // Verify it's actually JSON before claiming success
+    try {
+      JSON.parse(trimmed);
+    } catch {
+      return {
+        ok: false,
+        status: 502,
+        text: () => Promise.resolve(trimmed.substring(0, 200)),
+        json: () => Promise.reject(new Error('Non-JSON response')),
+      };
+    }
     return {
       ok: true,
       status: 200,
       text: () => Promise.resolve(result),
-      json: () => Promise.resolve(JSON.parse(result)),
+      json: () => Promise.resolve(JSON.parse(trimmed)),
     };
   } catch (e) {
-    const stderr = e.message || '';
-    if (stderr.includes('407') || e.status === 407) {
-      return { ok: false, status: 407, text: () => Promise.resolve('Proxy auth required'), json: () => Promise.reject('Proxy auth required') };
-    }
-    if (stderr.includes('403') || e.status === 403) {
-      return { ok: false, status: 403, text: () => Promise.resolve('Forbidden'), json: () => Promise.reject('Forbidden') };
-    }
-    throw e;
+    // Non-zero exit code from curl = failure
+    return {
+      ok: false,
+      status: 403,
+      text: () => Promise.resolve(e.message),
+      json: () => Promise.reject(e.message),
+    };
   }
 }
 
