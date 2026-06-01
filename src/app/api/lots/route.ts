@@ -148,6 +148,7 @@ export async function GET(request: NextRequest) {
     }
 
     // For leiloes: filter out lots from auctions that have ended (past result_date OR COMPLETED status)
+    // AND filter out lots from cities where ALL bid periods are in the past
     if (leiloes) {
       const today = new Date().toISOString().split("T")[0];
       const { data: allAuctions } = await svc
@@ -164,10 +165,33 @@ export async function GET(request: NextRequest) {
           }
         }
       }
-      if (excludeAuctionIds.length > 0 || excludeAuctionCodes.size > 0) {
+      // Find cities where all bid periods are in the past (no active bidding)
+      const { data: cityMaxDates } = await svc
+        .from("bid_periods")
+        .select("city_id");
+      const { data: latestPeriods } = await svc
+        .from("bid_periods")
+        .select("city_id, end_date")
+        .order("end_date", { ascending: false });
+      // Get cities whose most recent bid_period ended before today
+      const latestByCity: Record<number, string> = {};
+      if (latestPeriods) {
+        for (const p of latestPeriods as any[]) {
+          if (!latestByCity[p.city_id]) {
+            latestByCity[p.city_id] = p.end_date;
+          }
+        }
+      }
+      const endedCityIds = Object.entries(latestByCity)
+        .filter(([_, end_date]) => end_date < today)
+        .map(([city_id]) => parseInt(city_id));
+
+      if (excludeAuctionIds.length > 0 || excludeAuctionCodes.size > 0 || endedCityIds.length > 0) {
         lots = (lots || []).filter((l: any) => {
           if (l.auction_id && excludeAuctionIds.includes(l.auction_id)) return false;
           if (l.co_leilao && excludeAuctionCodes.has(l.co_leilao)) return false;
+          // Exclude lots from cities where all bid periods have ended
+          if (l.city_id && endedCityIds.includes(l.city_id)) return false;
           return true;
         }) as any;
       }
