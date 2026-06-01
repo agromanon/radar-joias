@@ -34,8 +34,7 @@ RUN addgroup --system --gid 1001 nodejs && \
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-# Copy scraper files from build context (not builder stage, to avoid stale cache issues)
-COPY scraper.js http-proxy-utils.js llm-gateway.js ./
+COPY --from=builder /app/scraper.js /app/http-proxy-utils.js /app/llm-gateway.js ./
 
 USER nextjs
 
