@@ -193,18 +193,30 @@ export async function GET(request: NextRequest) {
         .map(([city_id]) => parseInt(city_id));
 
       // Only filter if we have exclude criteria
-      if (excludeAuctionIds.length > 0 || excludeAuctionCodes.size > 0 || endedCityIds.length > 0) {
-        lots = (lots || []).filter((l: any) => {
-          // Exclude if auction is ended (COMPLETED or past result_date)
-          if (l.auction_id && excludeAuctionIds.includes(l.auction_id)) return false;
-          // Exclude if co_leilao matches an ended auction_code
-          if (l.co_leilao && excludeAuctionCodes.has(l.co_leilao)) return false;
-          // Exclude ONLY if city has NO future bid periods AND no auction_id
-          // (lots with valid auction_id that isn't excluded should remain)
-          if (!l.auction_id && l.city_id && endedCityIds.includes(l.city_id)) return false;
-          return true;
-        }) as any;
-      }
+    console.error("DEBUG filter: excludeAuctionIds.length=", excludeAuctionIds.length, "excludeAuctionCodes.size=", excludeAuctionCodes.size, "endedCityIds.length=", endedCityIds.length);
+    if (excludeAuctionIds.length > 0 || excludeAuctionCodes.size > 0 || endedCityIds.length > 0) {
+      console.error("DEBUG filter: running filter, lots count before=", (lots || []).length);
+      lots = (lots || []).filter((l: any) => {
+        // Exclude if auction is ended (COMPLETED or past result_date)
+        if (l.auction_id && excludeAuctionIds.includes(l.auction_id)) {
+          console.error("DEBUG filter: excluding lot", l.id, "due to auction_id", l.auction_id);
+          return false;
+        }
+        // Exclude if co_leilao matches an ended auction_code
+        if (l.co_leilao && excludeAuctionCodes.has(l.co_leilao)) {
+          console.error("DEBUG filter: excluding lot", l.id, "due to co_leilao", l.co_leilao);
+          return false;
+        }
+        // Exclude ONLY if city has NO future bid periods AND no auction_id
+        // (lots with valid auction_id that isn't excluded should remain)
+        if (!l.auction_id && l.city_id && endedCityIds.includes(l.city_id)) {
+          console.error("DEBUG filter: excluding lot", l.id, "due to city_id", l.city_id);
+          return false;
+        }
+        return true;
+      }) as any;
+      console.error("DEBUG filter: lots count after=", (lots || []).length);
+    }
     }
 
     // For vendas: also fetch lots from completed auctions awaiting results (outcome_status=null)
