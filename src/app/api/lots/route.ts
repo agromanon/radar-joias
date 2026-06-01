@@ -44,9 +44,10 @@ export async function GET(request: NextRequest) {
     const idParam = searchParams.get("id");
 
     // Build query — always include auctions for single-lot fetches
+    // idParam needs auction_id for the auction data fetch; leiloes/vendas use auction FK join
     const selectCols = leiloes || vendas || idParam
       ? "*, auctions(auction_code, bid_end_date, result_date, status, centralizer_unit, bid_start_date)"
-      : "*";
+      : "*, auction_id";
     let query = svc
       .from("lots")
       .select(selectCols, { count: "estimated" });
@@ -125,6 +126,8 @@ export async function GET(request: NextRequest) {
     // For bid_end sort, we must fetch all results first then sort+paginate in memory
     // because bid_end comes from bid_periods join and can't be sorted in SQL
     const isBidEndSort = sort === "bid_end";
+    const fromIdx = (page - 1) * limit;
+    const toIdx = fromIdx + limit - 1;
 
     if (!isBidEndSort) {
       query = query.order(dbSortCol, { ascending: order === "asc" });
@@ -133,7 +136,7 @@ export async function GET(request: NextRequest) {
     // Execute query — use range pagination for normal sorts, fetch all for bid_end sort
     const { data: lots, error, count } = isBidEndSort
       ? await query.limit(500) // cap at 500 for bid_end sort to prevent OOM
-      : await query.range(from, to);
+      : await query.range(fromIdx, toIdx);
 
     if (error) {
       console.error("Error fetching lots:", error);
@@ -185,23 +188,41 @@ export async function GET(request: NextRequest) {
     }
 
     // Fetch auction data separately (join via FK not reliable in this context)
-    const auctionIds = [...new Set((lots as any)?.map((l: any) => l.auction_id).filter(Boolean) || [])];
-    let auctionDataById: Record<number, {status: string, result_date: string, bid_end_date: string, bid_start_date: string}> = {};
-    if (auctionIds.length > 0) {
-      const { data: auctionRows } = await svc
-        .from("auctions")
-        .select("id, status, result_date, bid_end_date, bid_start_date")
-        .in("id", auctionIds);
-      if (auctionRows) {
-        for (const a of auctionRows) {
-          auctionDataById[a.id] = a;
+    // For leiloes: use co_leilao to lookup auction by auction_code; for others: use auction_id column
+    let auctionDataById: Record<string, {status: string, result_date: string, bid_end_date: string, bid_start_date: string}> = {};
+    if (leiloes) {
+      // For leiloes, lookup by co_leilao (auction_code format) and auction status
+      const coLeiloes = [...new Set((lots as any)?.map((l: any) => l.co_leilao).filter(Boolean) || [])];
+      if (coLeiloes.length > 0) {
+        const { data: auctionRows } = await svc
+          .from("auctions")
+          .select("id, auction_code, status, result_date, bid_end_date, bid_start_date")
+          .in("auction_code", coLeiloes);
+        if (auctionRows) {
+          for (const a of auctionRows) {
+            auctionDataById[a.auction_code] = a;
+          }
+        }
+      }
+    } else {
+      const auctionIds = [...new Set((lots as any)?.map((l: any) => l.auction_id).filter(Boolean) || [])];
+      if (auctionIds.length > 0) {
+        const { data: auctionRows } = await svc
+          .from("auctions")
+          .select("id, status, result_date, bid_end_date, bid_start_date")
+          .in("id", auctionIds);
+        if (auctionRows) {
+          for (const a of auctionRows) {
+            auctionDataById[a.id] = a;
+          }
         }
       }
     }
 
     // Use auction's bid dates if available, else bid_periods, else result_date (completed)
     let lotsWithSourceUrl = (lots as any)?.map((lot: any) => {
-      const auction = auctionDataById[lot.auction_id];
+      // For leiloes: lookup auction by co_leilao (auction_code); for others: use auctionDataById by id
+      const auction = leiloes ? auctionDataById[lot.co_leilao] : auctionDataById[lot.auction_id];
       const bid_end_auction = auction?.bid_end_date || null;
       const bid_start_auction = auction?.bid_start_date || null;
 
@@ -261,12 +282,10 @@ export async function GET(request: NextRequest) {
         return aEnd.localeCompare(bEnd);  // both same status → sort ascending
       });
       // Apply pagination after sorting
-      const fromIdx = (page - 1) * limit;
-      const toIdx = fromIdx + limit;
-      lotsWithSourceUrl = lotsWithSourceUrl.slice(fromIdx, toIdx);
+      lotsWithSourceUrl = lotsWithSourceUrl.slice(fromIdx, fromIdx + limit);
     }
 
-    const totalSorted = isBidEndSort ? (count || 0) : (count || 0);
+    const totalSorted = count || 0;
 
     // Return response with pagination metadata
     return NextResponse.json({
