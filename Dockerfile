@@ -34,15 +34,7 @@ RUN addgroup --system --gid 1001 nodejs && \
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
-
-# Download scraper files from git to avoid BuildKit cache inconsistency
-RUN cd /app && \
-    curl -sL https://raw.githubusercontent.com/agromanon/radar-joias/main/scraper.js -o scraper.js && \
-    curl -sL https://raw.githubusercontent.com/agromanon/radar-joias/main/http-proxy-utils.js -o http-proxy-utils.js && \
-    curl -sL https://raw.githubusercontent.com/agromanon/radar-joias/main/llm-gateway.js -o llm-gateway.js
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules ./node_modules
 
 USER nextjs
 
