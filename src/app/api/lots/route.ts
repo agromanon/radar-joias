@@ -142,7 +142,7 @@ export async function GET(request: NextRequest) {
       : isBidEndSort
       ? await query.limit(500) // bid_end sort: fetch all for in-memory sort
       : await query.range(fromIdx, toIdx); // other sorts: use range pagination
-    console.error("DEBUG: after query, lots count =", (lots || []).length, "count =", count);
+    console.error("DEBUG: after query, lots count =", (lots || []).length, "count =", count, "leiloes=", leiloes, "isBidEndSort=", isBidEndSort);
 
     if (error) {
       console.error("Error fetching lots:", error);
