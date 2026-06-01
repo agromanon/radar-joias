@@ -149,14 +149,12 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // For leiloes: filter out lots from auctions that have ended (past result_date OR COMPLETED status)
-    // AND filter out lots from cities where ALL bid periods are in the past
+    // For leiloes: filter out lots from auctions that have ended OR cities with no future bid periods
     if (leiloes) {
       const today = new Date().toISOString().split("T")[0];
       const { data: allAuctions } = await svc
         .from("auctions")
         .select("id, auction_code, status, result_date");
-      console.error("DEBUG leiloes filter: total lots before filter =", (lots || []).length, "auctions fetched =", allAuctions?.length || 0);
       // Exclude: status=COMPLETED OR result_date is in the past
       const excludeAuctionIds: number[] = [];
       const excludeAuctionCodes: Set<string> = new Set();
@@ -168,8 +166,7 @@ export async function GET(request: NextRequest) {
           }
         }
       }
-      console.error("DEBUG: excludeAuctionIds count =", excludeAuctionIds.length, "excludeAuctionCodes size =", excludeAuctionCodes.size);
-      // Find cities whose latest bid_period ended before today
+      // Find cities whose latest bid_period ended before today (no future bidding possible)
       const { data: latestPeriods } = await svc
         .from("bid_periods")
         .select("city_id, end_date")
@@ -185,18 +182,19 @@ export async function GET(request: NextRequest) {
       const endedCityIds = Object.entries(latestByCity)
         .filter(([_, end_date]) => end_date < today)
         .map(([city_id]) => parseInt(city_id));
-      console.error("DEBUG: endedCityIds count =", endedCityIds.length, "endedCityIds sample =", endedCityIds.slice(0, 5));
 
-      // Only filter if we have exclude criteria; otherwise keep all lots
+      // Only filter if we have exclude criteria
       if (excludeAuctionIds.length > 0 || excludeAuctionCodes.size > 0 || endedCityIds.length > 0) {
-        console.error("DEBUG: applying filter, lots before =", (lots || []).length);
         lots = (lots || []).filter((l: any) => {
+          // Exclude if auction is ended (COMPLETED or past result_date)
           if (l.auction_id && excludeAuctionIds.includes(l.auction_id)) return false;
+          // Exclude if co_leilao matches an ended auction_code
           if (l.co_leilao && excludeAuctionCodes.has(l.co_leilao)) return false;
-          if (l.city_id && endedCityIds.includes(l.city_id)) return false;
+          // Exclude ONLY if city has NO future bid periods AND no auction_id
+          // (lots with valid auction_id that isn't excluded should remain)
+          if (!l.auction_id && l.city_id && endedCityIds.includes(l.city_id)) return false;
           return true;
         }) as any;
-        console.error("DEBUG: after filter, lots =", (lots || []).length);
       }
     }
 
