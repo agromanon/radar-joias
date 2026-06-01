@@ -69,33 +69,26 @@ async function buildProxyAgent(proxyUrl) {
 const MAX_PROXY_RETRIES = 3;
 
 async function curlFetch(url, proxyUrl, options = {}) {
-  // Build curl command: curl --proxy "http://host:port/" -H "headers" "url"
+  // Build curl command using array form to avoid shell interpretation
   const u = parseProxyUrl(proxyUrl);
   const proxyHost = u?.hostname ?? proxyUrl;
   const proxyPort = u?.port ?? '80';
 
-  // Build -H flags for custom headers
-  const headerFlags = [];
-  const headers = options.headers ?? {};
+  const args = ['curl', '-s', '--max-time', '30', '--proxy', `http://${proxyHost}:${proxyPort}/`];
+
+  // Add headers
+  const headers = { ...options.headers };
+  if (!headers['accept']) headers['accept'] = 'application/json';
+  if (!headers['user-agent']) headers['user-agent'] = 'Mozilla/5.0';
+
   for (const [key, value] of Object.entries(headers)) {
-    headerFlags.push('-H', `${key}: ${value}`);
+    args.push('-H', `${key}: ${value}`);
   }
 
-  // Add accept header if not present
-  if (!headers['accept']) {
-    headerFlags.push('-H', 'accept: application/json');
-  }
-
-  const cmd = [
-    'curl', '-s', '--max-time', '30',
-    '--proxy', `http://${proxyHost}:${proxyPort}/`,
-    ...headerFlags,
-    '-k', // skip SSL verification for CAIXA cert issues
-    url,
-  ];
+  args.push('-k', url);
 
   try {
-    const result = execSync(cmd.join(' '), { encoding: 'utf-8' });
+    const result = execSync(args, { encoding: 'utf-8' });
     return {
       ok: true,
       status: 200,
