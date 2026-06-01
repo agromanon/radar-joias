@@ -82,19 +82,49 @@ async function buildProxyAgent(proxyUrl) {
 // FETCH WITH PROXY (used by scraper for CAIXA API calls)
 // ============================================================
 
+// Max retries per fetch — tries different proxy each time
+const MAX_PROXY_RETRIES = 3;
+
 export async function proxiedFetch(url, options = {}) {
-  const proxyUrl = getProxyUrl();
-  const agent = await buildProxyAgent(proxyUrl);
+  initProxyPool();
 
-  const fetchOptions = {
-    ...options,
-    ...(agent ? { agent } : {}),
-  };
-
-  if (proxyUrl) {
-    const u = parseProxyUrl(proxyUrl);
-    console.log(`  [proxy] ${u?.hostname ?? proxyUrl} → ${url}`);
+  if (proxyPool.length === 0) {
+    return fetch(url, options);
   }
 
-  return fetch(url, fetchOptions);
+  let lastError;
+  for (let attempt = 0; attempt < MAX_PROXY_RETRIES; attempt++) {
+    const proxyUrl = proxyPool[(proxyIndex + attempt) % proxyPool.length];
+    const agent = await buildProxyAgent(proxyUrl);
+
+    const fetchOptions = {
+      ...options,
+      ...(agent ? { agent } : {}),
+    };
+
+    const u = parseProxyUrl(proxyUrl);
+    console.log(`  [proxy] ${u?.hostname ?? proxyUrl} → ${url}`);
+
+    try {
+      const res = await fetch(url, fetchOptions);
+
+      // Retry on 403 (blocked proxy) or 429 (rate limit) with a different proxy
+      if ((res.status === 403 || res.status === 429) && attempt < MAX_PROXY_RETRIES - 1) {
+        const u2 = parseProxyUrl(proxyUrl);
+        console.warn(`  [proxy] ${u2?.hostname ?? proxyUrl} returned ${res.status}, trying next proxy...`);
+        proxyIndex++; // Advance to next proxy for next attempt
+        continue;
+      }
+
+      return res;
+    } catch (e) {
+      lastError = e;
+      if (attempt < MAX_PROXY_RETRIES - 1) {
+        console.warn(`  [proxy] ${u?.hostname ?? proxyUrl} failed: ${e.message}, trying next proxy...`);
+        proxyIndex++;
+      }
+    }
+  }
+
+  throw lastError ?? new Error('All proxies failed');
 }
