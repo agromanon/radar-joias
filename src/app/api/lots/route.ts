@@ -57,6 +57,9 @@ export async function GET(request: NextRequest) {
       query = query.is("outcome_status", null);
       query = query.eq("enrichment_status", "enriched");
       query = query.not("valor", "is", null);
+      // Exclude lots from COMPLETED auctions — those lots are in the Vendas phase,
+      // not available for bidding. Filter by auction status via subquery.
+      query = query.not("auction_id", "in", "(SELECT id FROM auctions WHERE status = 'COMPLETED')");
     }
 
     // Vendas sold lots filters
@@ -275,7 +278,7 @@ export async function GET(request: NextRequest) {
       lotsWithSourceUrl.sort((a: any, b: any) => {
         const aEnd = a.bid_end || "9999-12-31";
         const bEnd = b.bid_end || "9999-12-31";
-        const aPast = aEnd < today;
+        const aPast = aEnd < today; // only strictly past dates go to bottom
         const bPast = bEnd < today;
         if (aPast && !bPast) return 1;   // past → push down
         if (!aPast && bPast) return -1; // future → bring forward
