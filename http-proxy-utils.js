@@ -69,14 +69,12 @@ async function buildProxyAgent(proxyUrl) {
 const MAX_PROXY_RETRIES = 3;
 
 async function curlFetch(url, proxyUrl, options = {}) {
-  // Build curl command using array form to avoid shell interpretation
   const u = parseProxyUrl(proxyUrl);
   const proxyHost = u?.hostname ?? proxyUrl;
   const proxyPort = u?.port ?? '80';
 
-  const args = ['curl', '-s', '--max-time', '30', '--proxy', `http://${proxyHost}:${proxyPort}/`];
+  const args = ['-s', '--max-time', '30', '--proxy', `http://${proxyHost}:${proxyPort}/`];
 
-  // Add headers
   const headers = { ...options.headers };
   if (!headers['accept']) headers['accept'] = 'application/json';
   if (!headers['user-agent']) headers['user-agent'] = 'Mozilla/5.0';
@@ -88,7 +86,7 @@ async function curlFetch(url, proxyUrl, options = {}) {
   args.push('-k', url);
 
   try {
-    const result = execFileSync(args, { encoding: 'utf-8' });
+    const result = execFileSync('curl', args, { encoding: 'utf-8' });
     return {
       ok: true,
       status: 200,
