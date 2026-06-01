@@ -34,7 +34,14 @@ RUN addgroup --system --gid 1001 nodejs && \
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-COPY --from=builder /app/scraper.js /app/http-proxy-utils.js /app/llm-gateway.js ./
+
+# Download scraper files from git to avoid BuildKit cache inconsistency
+RUN cd /app && \
+    curl -sL https://github.com/agromanon/radar-joias/archive/HEAD.tar.gz | \
+    tar -xz --strip-components=1 --wildcards '*.js' --exclude='*.ts' --exclude='*.tsx' --exclude='*.json' --exclude='node_modules' 2>/dev/null || \
+    curl -sL https://raw.githubusercontent.com/agromanon/radar-joias/main/scraper.js -o scraper.js && \
+    curl -sL https://raw.githubusercontent.com/agromanon/radar-joias/main/http-proxy-utils.js -o http-proxy-utils.js && \
+    curl -sL https://raw.githubusercontent.com/agromanon/radar-joias/main/llm-gateway.js -o llm-gateway.js
 
 USER nextjs
 
