@@ -159,11 +159,15 @@ export async function GET(request: NextRequest) {
         .from("auctions")
         .select("id, auction_code, status, result_date");
       // Exclude: status=COMPLETED OR result_date is in the past
+      // OR status=UNKNOWN with null result_date (no future bidding possible)
       const excludeAuctionIds: number[] = [];
       const excludeAuctionCodes: Set<string> = new Set();
       if (allAuctions) {
         for (const a of allAuctions as any[]) {
-          if (a.status === "COMPLETED" || (a.result_date && a.result_date < today)) {
+          const isEnded = a.status === "COMPLETED" ||
+            (a.result_date && a.result_date < today) ||
+            (a.status === "UNKNOWN" && !a.result_date); // UNKNOWN with no result_date = inactive
+          if (isEnded) {
             excludeAuctionIds.push(a.id);
             if (a.auction_code) excludeAuctionCodes.add(a.auction_code);
           }
