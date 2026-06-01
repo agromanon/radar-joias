@@ -165,15 +165,11 @@ export async function GET(request: NextRequest) {
           }
         }
       }
-      // Find cities where all bid periods are in the past (no active bidding)
-      const { data: cityMaxDates } = await svc
-        .from("bid_periods")
-        .select("city_id");
+      // Find cities whose latest bid_period ended before today
       const { data: latestPeriods } = await svc
         .from("bid_periods")
         .select("city_id, end_date")
         .order("end_date", { ascending: false });
-      // Get cities whose most recent bid_period ended before today
       const latestByCity: Record<number, string> = {};
       if (latestPeriods) {
         for (const p of latestPeriods as any[]) {
@@ -186,11 +182,11 @@ export async function GET(request: NextRequest) {
         .filter(([_, end_date]) => end_date < today)
         .map(([city_id]) => parseInt(city_id));
 
+      // Only filter if we have exclude criteria; otherwise keep all lots
       if (excludeAuctionIds.length > 0 || excludeAuctionCodes.size > 0 || endedCityIds.length > 0) {
         lots = (lots || []).filter((l: any) => {
           if (l.auction_id && excludeAuctionIds.includes(l.auction_id)) return false;
           if (l.co_leilao && excludeAuctionCodes.has(l.co_leilao)) return false;
-          // Exclude lots from cities where all bid periods have ended
           if (l.city_id && endedCityIds.includes(l.city_id)) return false;
           return true;
         }) as any;
