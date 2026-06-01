@@ -135,9 +135,11 @@ export async function GET(request: NextRequest) {
     }
 
     // Execute query — use range pagination for normal sorts, fetch all for bid_end sort
+    console.error("DEBUG: before query, fromIdx=", fromIdx, "toIdx=", toIdx, "isBidEndSort=", isBidEndSort);
     let { data: lots, error, count } = isBidEndSort
       ? await query.limit(500) // cap at 500 for bid_end sort to prevent OOM
       : await query.range(fromIdx, toIdx);
+    console.error("DEBUG: after query, lots count =", (lots || []).length, "count =", count);
 
     if (error) {
       console.error("Error fetching lots:", error);
@@ -183,15 +185,18 @@ export async function GET(request: NextRequest) {
       const endedCityIds = Object.entries(latestByCity)
         .filter(([_, end_date]) => end_date < today)
         .map(([city_id]) => parseInt(city_id));
+      console.error("DEBUG: endedCityIds count =", endedCityIds.length, "endedCityIds sample =", endedCityIds.slice(0, 5));
 
       // Only filter if we have exclude criteria; otherwise keep all lots
       if (excludeAuctionIds.length > 0 || excludeAuctionCodes.size > 0 || endedCityIds.length > 0) {
+        console.error("DEBUG: applying filter, lots before =", (lots || []).length);
         lots = (lots || []).filter((l: any) => {
           if (l.auction_id && excludeAuctionIds.includes(l.auction_id)) return false;
           if (l.co_leilao && excludeAuctionCodes.has(l.co_leilao)) return false;
           if (l.city_id && endedCityIds.includes(l.city_id)) return false;
           return true;
         }) as any;
+        console.error("DEBUG: after filter, lots =", (lots || []).length);
       }
     }
 
