@@ -2,8 +2,7 @@
  * Proxy rotation module
  * Supports:
  *  - Manual proxy list (PROXY_URLS env var, comma-separated)
- *  - WebShare via PROXY_SERVICE=webshare + PROXY_URLS=token (fetches individual proxies from API)
- *  - WebShare rotating proxy with IP auth: PROXY_URLS=http://p.webshare.io:PORT/
+ *  - WebShare rotating proxy with IP auth via curl fallback
  *
  * NOTE: ProxyAgent is imported lazily inside buildProxyAgent() to prevent
  * proxy-agent v8 from patching globalThis.fetch, which would break
@@ -11,6 +10,7 @@
  */
 
 import { URL } from 'url';
+import { execSync } from 'child_process';
 
 // Proxy pool — initialized lazily on first call to getProxyUrl()
 let proxyIndex = 0;
@@ -25,7 +25,7 @@ function parseProxyUrl(raw) {
   }
 }
 
-async function initProxyPool() {
+function initProxyPool() {
   if (initialized) return;
   initialized = true;
   proxyPool = [];
@@ -37,35 +37,11 @@ async function initProxyPool() {
     .filter(Boolean);
 
   for (const url of urls) {
-    // Skip WebShare token format (user_pass) which is handled below
+    // Skip WebShare token format
     if (url.includes('_') && !url.startsWith('http://') && !url.startsWith('https://')) {
       continue;
     }
     proxyPool.push(url);
-  }
-
-  // WebShare token → individual proxy list from API
-  if (process.env.PROXY_SERVICE === 'webshare' && process.env.PROXY_URLS) {
-    const token = process.env.PROXY_URLS.trim();
-    if (!token.startsWith('http://') && !token.startsWith('https://')) {
-      try {
-        const apiRes = await fetch('https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page_size=100', {
-          headers: { 'Authorization': `Token ${token}` },
-        });
-        if (apiRes.ok) {
-          const data = await apiRes.json();
-          for (const p of data.results ?? []) {
-            if (p.valid) {
-              proxyPool.push(`http://${p.username}:${p.password}@${p.proxy_address}:${p.port}/`);
-            }
-          }
-        } else {
-          console.warn(`  WebShare API returned ${apiRes.status}`);
-        }
-      } catch (e) {
-        console.warn(`  WebShare API error: ${e.message}`);
-      }
-    }
   }
 
   if (proxyPool.length === 0) {
@@ -87,12 +63,59 @@ async function buildProxyAgent(proxyUrl) {
 
 // ============================================================
 // FETCH WITH PROXY (used by scraper for CAIXA API calls)
+// Uses curl as fallback when proxy-agent returns 403
 // ============================================================
 
 const MAX_PROXY_RETRIES = 3;
 
+async function curlFetch(url, proxyUrl, options = {}) {
+  // Build curl command: curl --proxy "http://host:port/" -H "headers" "url"
+  const u = parseProxyUrl(proxyUrl);
+  const proxyHost = u?.hostname ?? proxyUrl;
+  const proxyPort = u?.port ?? '80';
+
+  // Build -H flags for custom headers
+  const headerFlags = [];
+  const headers = options.headers ?? {};
+  for (const [key, value] of Object.entries(headers)) {
+    headerFlags.push('-H', `${key}: ${value}`);
+  }
+
+  // Add accept header if not present
+  if (!headers['accept']) {
+    headerFlags.push('-H', 'accept: application/json');
+  }
+
+  const cmd = [
+    'curl', '-s', '--max-time', '30',
+    '--proxy', `http://${proxyHost}:${proxyPort}/`,
+    ...headerFlags,
+    '-k', // skip SSL verification for CAIXA cert issues
+    url,
+  ];
+
+  try {
+    const result = execSync(cmd.join(' '), { encoding: 'utf-8' });
+    return {
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve(result),
+      json: () => Promise.resolve(JSON.parse(result)),
+    };
+  } catch (e) {
+    const stderr = e.message || '';
+    if (stderr.includes('407')) {
+      return { ok: false, status: 407, text: () => Promise.resolve('Proxy auth required'), json: () => Promise.reject('Proxy auth required') };
+    }
+    if (stderr.includes('403')) {
+      return { ok: false, status: 403, text: () => Promise.resolve('Forbidden'), json: () => Promise.reject('Forbidden') };
+    }
+    throw e;
+  }
+}
+
 export async function proxiedFetch(url, options = {}) {
-  await initProxyPool();
+  initProxyPool();
 
   if (proxyPool.length === 0) {
     return fetch(url, options);
@@ -101,22 +124,33 @@ export async function proxiedFetch(url, options = {}) {
   let lastError;
   for (let attempt = 0; attempt < MAX_PROXY_RETRIES; attempt++) {
     const proxyUrl = proxyPool[(proxyIndex + attempt) % proxyPool.length];
-    const agent = await buildProxyAgent(proxyUrl);
-
-    const fetchOptions = {
-      ...options,
-      ...(agent ? { agent } : {}),
-    };
-
     const u = parseProxyUrl(proxyUrl);
     console.log(`  [proxy] ${u?.hostname ?? proxyUrl} → ${url}`);
 
     try {
+      // Try proxy-agent first
+      const agent = await buildProxyAgent(proxyUrl);
+      const fetchOptions = {
+        ...options,
+        ...(agent ? { agent } : {}),
+      };
+
       const res = await fetch(url, fetchOptions);
 
+      // If 403 from p.webshare.io, fall back to curl
+      if (res.status === 403 && u?.hostname === 'p.webshare.io') {
+        console.warn(`  [proxy] p.webshare.io returned 403, trying curl fallback...`);
+        const curlRes = await curlFetch(url, proxyUrl, options);
+        if (curlRes.ok) return curlRes;
+        if (attempt < MAX_PROXY_RETRIES - 1) {
+          proxyIndex++;
+          continue;
+        }
+        return curlRes;
+      }
+
       if ((res.status === 403 || res.status === 429) && attempt < MAX_PROXY_RETRIES - 1) {
-        const u2 = parseProxyUrl(proxyUrl);
-        console.warn(`  [proxy] ${u2?.hostname ?? proxyUrl} returned ${res.status}, trying next proxy...`);
+        console.warn(`  [proxy] ${u?.hostname ?? proxyUrl} returned ${res.status}, trying next proxy...`);
         proxyIndex++;
         continue;
       }
@@ -124,6 +158,23 @@ export async function proxiedFetch(url, options = {}) {
       return res;
     } catch (e) {
       lastError = e;
+
+      // If proxy-agent fails with network error and it's p.webshare.io, try curl
+      if (u?.hostname === 'p.webshare.io') {
+        console.warn(`  [proxy] proxy-agent failed for p.webshare.io: ${e.message}, trying curl...`);
+        try {
+          const curlRes = await curlFetch(url, proxyUrl, options);
+          if (curlRes.ok) return curlRes;
+          if (attempt < MAX_PROXY_RETRIES - 1) {
+            proxyIndex++;
+            continue;
+          }
+          return curlRes;
+        } catch (curlErr) {
+          lastError = curlErr;
+        }
+      }
+
       if (attempt < MAX_PROXY_RETRIES - 1) {
         console.warn(`  [proxy] ${u?.hostname ?? proxyUrl} failed: ${e.message}, trying next proxy...`);
         proxyIndex++;
