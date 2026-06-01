@@ -134,11 +134,14 @@ export async function GET(request: NextRequest) {
       query = query.order(dbSortCol, { ascending: order === "asc" });
     }
 
-    // Execute query — use range pagination for normal sorts, fetch all for bid_end sort
+    // Execute query — for leiloes always fetch up to 500 to allow proper filtering
+    // then slice to the requested range after filtering
     console.error("DEBUG: before query, fromIdx=", fromIdx, "toIdx=", toIdx, "isBidEndSort=", isBidEndSort);
-    let { data: lots, error, count } = isBidEndSort
-      ? await query.limit(500) // cap at 500 for bid_end sort to prevent OOM
-      : await query.range(fromIdx, toIdx);
+    let { data: lots, error, count } = leiloes
+      ? await query.limit(500) // leiloes: fetch more, filter, then slice
+      : isBidEndSort
+      ? await query.limit(500) // bid_end sort: fetch all for in-memory sort
+      : await query.range(fromIdx, toIdx); // other sorts: use range pagination
     console.error("DEBUG: after query, lots count =", (lots || []).length, "count =", count);
 
     if (error) {
@@ -358,7 +361,11 @@ export async function GET(request: NextRequest) {
         if (!aPast && bPast) return -1; // future → bring forward
         return aEnd.localeCompare(bEnd);  // both same status → sort ascending
       });
-      // Apply pagination after sorting
+    }
+
+    // For leiloes non-bid_end sorts: slice to the requested range after filtering
+    // (fetched 500 but filter may reject most, so we can't use DB range pagination)
+    if (leiloes && !isBidEndSort) {
       lotsWithSourceUrl = lotsWithSourceUrl.slice(fromIdx, fromIdx + limit);
     }
 
