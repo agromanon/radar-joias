@@ -195,11 +195,6 @@ export async function GET(request: NextRequest) {
         .filter(([_, end_date]) => end_date < today)
         .map(([city_id]) => parseInt(city_id));
 
-      // Build set of cities whose latest bid period ended BEFORE today (no future bidding possible)
-      const endedCityIds = Object.entries(latestByCity)
-        .filter(([_, end_date]) => end_date < today)
-        .map(([city_id]) => parseInt(city_id));
-
       // Filter: only exclude lots from definitively COMPLETED auctions (past result_date)
       // OR cities with NO future bid periods that have no surviving auction link.
       // UNKNOWN auctions with null result_date are kept if the city still has future bid periods —
