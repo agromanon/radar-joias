@@ -147,23 +147,27 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // For leiloes: filter out lots from COMPLETED auctions OR auctions with result_date in the past
-    // (those auctions have ended bidding, results are pending/published → go to vendas)
+    // For leiloes: filter out lots from auctions that have ended (past result_date OR COMPLETED status)
     if (leiloes) {
-      const { data: completedAuctions } = await svc
-        .from("auctions")
-        .select("id, auction_code, status, result_date")
-        .eq("status", "COMPLETED");
       const today = new Date().toISOString().split("T")[0];
-      // Completed IDs + IDs where result_date is in the past
-      const completedIds = completedAuctions?.map((a: any) => a.id) || [];
-      const pastResultIds = completedAuctions?.filter((a: any) => a.result_date && a.result_date < today).map((a: any) => a.id) || [];
-      const allExcludeIds = [...new Set([...completedIds, ...pastResultIds])];
-      const completedCodes = new Set(completedAuctions?.filter((a: any) => a.result_date && a.result_date < today).map((a: any) => a.auction_code) || []);
-      if (allExcludeIds.length > 0 || completedCodes.size > 0) {
+      const { data: allAuctions } = await svc
+        .from("auctions")
+        .select("id, auction_code, status, result_date");
+      // Exclude: status=COMPLETED OR result_date is in the past
+      const excludeAuctionIds: number[] = [];
+      const excludeAuctionCodes: Set<string> = new Set();
+      if (allAuctions) {
+        for (const a of allAuctions as any[]) {
+          if (a.status === "COMPLETED" || (a.result_date && a.result_date < today)) {
+            excludeAuctionIds.push(a.id);
+            if (a.auction_code) excludeAuctionCodes.add(a.auction_code);
+          }
+        }
+      }
+      if (excludeAuctionIds.length > 0 || excludeAuctionCodes.size > 0) {
         lots = (lots || []).filter((l: any) => {
-          if (l.auction_id && allExcludeIds.includes(l.auction_id)) return false;
-          if (l.co_leilao && completedCodes.has(l.co_leilao)) return false;
+          if (l.auction_id && excludeAuctionIds.includes(l.auction_id)) return false;
+          if (l.co_leilao && excludeAuctionCodes.has(l.co_leilao)) return false;
           return true;
         }) as any;
       }
