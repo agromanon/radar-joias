@@ -7,6 +7,8 @@ RUN npm ci
 # ---- Build stage ----
 FROM node:20-slim AS builder
 WORKDIR /app
+# Force builder to re-evaluate .dockerignore changes by adding a cache-busting layer
+RUN echo "force-rebuild-$(date +%s)" > /tmp/force-rebuild
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
@@ -32,9 +34,8 @@ RUN addgroup --system --gid 1001 nodejs && \
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-
-# Include scraper and its dependencies for cron jobs
-COPY --from=builder --chown=nextjs:nodejs /app/scraper.js /app/http-proxy-utils.js /app/llm-gateway.js ./
+# Copy scraper files from build context (not builder stage, to avoid stale cache issues)
+COPY scraper.js http-proxy-utils.js llm-gateway.js ./
 
 USER nextjs
 
