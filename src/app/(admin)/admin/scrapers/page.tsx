@@ -1,174 +1,302 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { Database, RefreshCw, AlertTriangle, CheckCircle2, Clock, Play, Square } from "lucide-react";
+import { useState, useEffect, useCallback } from "react";
+import { Bot, RefreshCw, AlertTriangle, CheckCircle2, Clock, Play, Zap, Image, Link2, FileText, TrendingUp, Trash2, Globe, Activity } from "lucide-react";
 
-interface ScraperLog {
-  auctioneer: string;
-  lots_count: number;
-  status: 'success' | 'error' | 'running';
-  ran_at: string;
+interface ScraperMode {
+  mode: string;
+  label: string;
+  description: string;
+  schedule: string;
+  isOnDemand: boolean;
+  stats: {
+    lastRun: string | null;
+    totalRuns: number;
+    successCount: number;
+    errorCount: number;
+    totalItemsFound: number;
+    totalItemsNew: number;
+    totalItemsUpdated: number;
+    totalErrors: number;
+    avgDurationMs: number;
+    lastSuccess: string | null;
+    lastError: string | null;
+  } | null;
 }
 
-interface Scraper {
-  id: string;
-  name: string;
-  url: string;
-  status: 'ONLINE' | 'ERROR' | 'PAUSED';
-  lastRun: string;
-  lotsFound: number;
-  successRate: string;
-  schedule: string;
+const MODE_ICONS: Record<string, React.ReactNode> = {
+  'states-cities': <Globe className="w-5 h-5" />,
+  'bid-periods': <Clock className="w-5 h-5" />,
+  'discover': <Bot className="w-5 h-5" />,
+  'active-lots': <Activity className="w-5 h-5" />,
+  'results': <CheckCircle2 className="w-5 h-5" />,
+  'insight': <TrendingUp className="w-5 h-5" />,
+  'enrich': <Zap className="w-5 h-5" />,
+  'download-images': <Image className="w-5 h-5" />,
+  'health-check-images': <Image className="w-5 h-5" />,
+  'refresh-images': <Image className="w-5 h-5" />,
+  'dedup': <Trash2 className="w-5 h-5" />,
+  'edital': <FileText className="w-5 h-5" />,
+  'auctions': <Link2 className="w-5 h-5" />,
+  'scrape-lots': <Activity className="w-5 h-5" />,
+  'scrape-results': <CheckCircle2 className="w-5 h-5" />,
+  're-scrape-missing': <Image className="w-5 h-5" />,
+  'reconstruct-urls': <Link2 className="w-5 h-5" />,
+};
+
+const MODE_COLORS: Record<string, string> = {
+  'states-cities': 'bg-blue-600',
+  'bid-periods': 'bg-indigo-600',
+  'discover': 'bg-purple-600',
+  'active-lots': 'bg-green-600',
+  'results': 'bg-teal-600',
+  'insight': 'bg-cyan-600',
+  'enrich': 'bg-yellow-600',
+  'download-images': 'bg-pink-600',
+  'health-check-images': 'bg-rose-600',
+  'refresh-images': 'bg-fuchsia-600',
+  'dedup': 'bg-orange-600',
+  'edital': 'bg-amber-600',
+  'auctions': 'bg-violet-600',
+  'scrape-lots': 'bg-emerald-600',
+  'scrape-results': 'bg-cyan-600',
+  're-scrape-missing': 'bg-pink-600',
+  'reconstruct-urls': 'bg-sky-600',
+};
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.round(ms / 1000)}s`
+}
+
+function formatTimeAgo(dateStr: string | null): string {
+  if (!dateStr) return 'Nunca'
+  const now = new Date()
+  const past = new Date(dateStr)
+  const diffMs = now.getTime() - past.getTime()
+  const diffMins = Math.floor(diffMs / 60000)
+  const diffHours = Math.floor(diffMins / 60)
+  const diffDays = Math.floor(diffHours / 24)
+  if (diffMins < 1) return 'Agora'
+  if (diffMins < 60) return `Há ${diffMins}m`
+  if (diffHours < 24) return `Há ${diffHours}h`
+  return `Há ${diffDays}d`
+}
+
+function StatusBadge({ stats }: { stats: ScraperMode['stats'] }) {
+  if (!stats) return <span className="text-xs text-[#8E9297]">Sem dados</span>
+  if (stats.errorCount > 0 && stats.totalRuns > 0) {
+    const errorRate = Math.round((stats.errorCount / stats.totalRuns) * 100)
+    return <span className="text-xs font-bold text-[#EF4444]">{errorRate}% erro</span>
+  }
+  if (stats.totalRuns === 0) return <span className="text-xs text-[#8E9297]">Nunca executado</span>
+  return <span className="text-xs font-bold text-[#10B981]">OK</span>
 }
 
 export default function ScrapersPage() {
-  const [scrapers, setScrapers] = useState<Scraper[]>([]);
+  const [modes, setModes] = useState<ScraperMode[]>([]);
   const [loading, setLoading] = useState(true);
+  const [triggering, setTriggering] = useState<string | null>(null);
+  const [triggerSuccess, setTriggerSuccess] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function fetchScrapers() {
-      try {
-        const response = await fetch('/api/admin/scrapers/logs');
-        if (response.ok) {
-          const data = await response.json();
-
-          // Transform API response to Scraper format
-          const transformedScrapers: Scraper[] = data.logs.map((log: ScraperLog, index: number) => {
-            // Calculate success rate (placeholder logic for now)
-            const successRate = log.status === 'success' ? '99.2%' :
-                                log.status === 'error' ? '0%' : '95.1%';
-
-            // Map status
-            const status: 'ONLINE' | 'ERROR' | 'PAUSED' = log.status === 'success' ? 'ONLINE' :
-                                                           log.status === 'error' ? 'ERROR' : 'PAUSED';
-
-            return {
-              id: log.auctioneer,
-              name: log.auctioneer,
-              url: `${log.auctioneer.toLowerCase().replace(/\s+/g, '')}.com.br`,
-              status,
-              lastRun: formatTimeAgo(log.ran_at),
-              lotsFound: log.lots_count,
-              successRate,
-              schedule: '*/30 * * * *', // Default schedule for now
-            };
-          });
-
-          setScrapers(transformedScrapers);
-        }
-      } catch (error) {
-        console.error('Error fetching scrapers:', error);
-      } finally {
-        setLoading(false);
+  const fetchStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/admin/scrapers/status');
+      if (res.ok) {
+        const data = await res.json();
+        setModes(data.modes || []);
       }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
     }
-
-    fetchScrapers();
   }, []);
 
-  const formatTimeAgo = (dateString: string) => {
-    const now = new Date();
-    const past = new Date(dateString);
-    const diffMs = now.getTime() - past.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHours = Math.floor(diffMins / 60);
+  useEffect(() => {
+    fetchStatus();
+  }, [fetchStatus]);
 
-    if (diffMins < 1) return 'Agora';
-    if (diffMins < 60) return `Há ${diffMins} min`;
-    return `Há ${diffHours}h`;
+  const handleTrigger = async (mode: string) => {
+    setTriggering(mode);
+    setTriggerSuccess(null);
+    try {
+      const res = await fetch('/api/admin/scrapers/trigger', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setTriggerSuccess(mode);
+        setTimeout(() => setTriggerSuccess(null), 3000);
+      } else {
+        console.error('Trigger failed:', data.error);
+      }
+    } catch (e) {
+      console.error('Trigger error:', e);
+    } finally {
+      setTriggering(null);
+    }
   };
 
-  const hasErrors = scrapers.some(s => s.status === 'ERROR');
+  const scheduledModes = modes.filter(m => !m.isOnDemand);
+  const onDemandModes = modes.filter(m => m.isOnDemand);
 
   return (
-    <div className="max-w-6xl mx-auto space-y-8 animate-in fade-in duration-500">
+    <div className="max-w-7xl mx-auto space-y-8 animate-in fade-in duration-500">
+      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white flex items-center gap-2">
-            <Database className="w-6 h-6 text-[#EF4444]" /> Robôs Scrapers
+          <h1 className="text-2xl font-bold text-white flex items-center gap-3">
+            <Bot className="w-7 h-7 text-[#5865F2]" /> Scraper Status
           </h1>
-          <p className="text-[#8E9297] text-sm mt-1">Gerencie e monitore os robôs de captura de lotes.</p>
+          <p className="text-[#8E9297] text-sm mt-1">Monitore execuções e acione robôs sob demanda.</p>
         </div>
-        <button className="flex items-center gap-2 bg-[#5865F2] hover:bg-[#4752C4] text-white px-5 py-2.5 rounded-xl font-bold transition-all text-sm shadow-lg shadow-[#5865F2]/20">
-          <RefreshCw className="w-4 h-4" /> Reiniciar Todos
+        <button
+          onClick={fetchStatus}
+          className="flex items-center gap-2 bg-[#151A22] border border-[#272A31] hover:border-[#454655] text-white px-4 py-2 rounded-xl font-bold transition-all text-sm"
+        >
+          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} /> Atualizar
         </button>
       </div>
 
-      {/* Alert banner */}
-      {hasErrors && (
-        <div className="bg-[#EF4444]/10 border border-[#EF4444]/30 rounded-2xl p-4 flex items-center gap-3">
-          <AlertTriangle className="w-5 h-5 text-[#EF4444] flex-shrink-0" />
-          <p className="text-[#EF4444] text-sm font-medium">
-            {scrapers.filter(s => s.status === 'ERROR').length} robô(s) com falha detectada. Verifique os logs para mais detalhes.
-          </p>
+      {/* Scheduled scrapers grid */}
+      <div>
+        <h2 className="text-sm font-bold text-[#8E9297] uppercase tracking-wider mb-4">Cronogramados</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          {loading ? (
+            [...Array(6)].map((_, i) => (
+              <div key={i} className="bg-[#151A22] border border-[#272A31] rounded-2xl p-5 animate-pulse">
+                <div className="h-5 bg-[#2F3136] rounded w-1/2 mb-3" />
+                <div className="h-4 bg-[#2F3136] rounded w-3/4 mb-4" />
+                <div className="h-8 bg-[#2F3136] rounded w-1/3" />
+              </div>
+            ))
+          ) : (
+            scheduledModes.map((m) => {
+              const iconBg = MODE_COLORS[m.mode] || 'bg-[#454655]'
+              return (
+                <div key={m.mode} className="bg-[#151A22] border border-[#272A31] rounded-2xl p-5 hover:border-[#454655] transition-all">
+                  <div className="flex items-start justify-between mb-3">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-10 h-10 rounded-xl ${iconBg} flex items-center justify-center text-white`}>
+                        {MODE_ICONS[m.mode] || <Bot className="w-5 h-5" />}
+                      </div>
+                      <div>
+                        <h3 className="text-white font-bold text-sm">{m.label}</h3>
+                        <p className="text-[#8E9297] text-xs">{m.schedule}</p>
+                      </div>
+                    </div>
+                    <StatusBadge stats={m.stats} />
+                  </div>
+                  <p className="text-[#8E9297] text-xs mb-4 leading-relaxed">{m.description}</p>
+                  {m.stats ? (
+                    <div className="grid grid-cols-3 gap-2 pt-3 border-t border-[#272A31]">
+                      <div className="text-center">
+                        <div className="text-white font-black text-lg">{m.stats.totalRuns}</div>
+                        <div className="text-[#8E9297] text-[10px] uppercase">Execuções</div>
+                      </div>
+                      <div className="text-center">
+                        <div className="text-white font-black text-lg">{m.stats.totalItemsFound.toLocaleString()}</div>
+                        <div className="text-[#8E9297] text-[10px] uppercase">Itens</div>
+                      </div>
+                      <div className="text-center">
+                        <div className="text-white font-black text-lg">{formatDuration(m.stats.avgDurationMs)}</div>
+                        <div className="text-[#8E9297] text-[10px] uppercase">Tempo Médio</div>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+
+      {/* On-demand scrapers */}
+      <div>
+        <h2 className="text-sm font-bold text-[#8E9297] uppercase tracking-wider mb-4">Sob Demanda</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+          {loading ? (
+            [...Array(4)].map((_, i) => (
+              <div key={i} className="bg-[#151A22] border border-[#272A31] rounded-xl p-4 animate-pulse">
+                <div className="h-4 bg-[#2F3136] rounded w-2/3 mb-2" />
+                <div className="h-3 bg-[#2F3136] rounded w-1/2" />
+              </div>
+            ))
+          ) : (
+            onDemandModes.map((m) => {
+              const iconBg = MODE_COLORS[m.mode] || 'bg-[#454655]'
+              return (
+                <div key={m.mode} className="bg-[#151A22] border border-[#272A31] rounded-xl p-4 flex items-center justify-between hover:border-[#454655] transition-all">
+                  <div className="flex items-center gap-3">
+                    <div className={`w-8 h-8 rounded-lg ${iconBg} flex items-center justify-center text-white`}>
+                      {MODE_ICONS[m.mode] || <Bot className="w-4 h-4" />}
+                    </div>
+                    <div>
+                      <h3 className="text-white font-bold text-xs">{m.label}</h3>
+                      <p className="text-[#8E9297] text-[10px]">{formatTimeAgo(m.stats?.lastRun || null)}</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleTrigger(m.mode)}
+                    disabled={triggering === m.mode}
+                    className={`relative flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                      triggerSuccess === m.mode
+                        ? 'bg-[#10B981] text-white'
+                        : 'bg-[#5865F2] hover:bg-[#4752C4] text-white disabled:opacity-50'
+                    }`}
+                  >
+                    {triggering === m.mode ? (
+                      <RefreshCw className="w-3 h-3 animate-spin" />
+                    ) : triggerSuccess === m.mode ? (
+                      <CheckCircle2 className="w-3 h-3" />
+                    ) : (
+                      <Play className="w-3 h-3" />
+                    )}
+                    {triggerSuccess === m.mode ? 'Disparado!' : 'Disparar'}
+                  </button>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+
+      {/* Stats summary */}
+      {!loading && modes.length > 0 && (
+        <div className="bg-[#151A22] border border-[#272A31] rounded-2xl p-6">
+          <h2 className="text-white font-bold text-sm mb-4">Resumo Geral</h2>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+            <div>
+              <div className="text-3xl font-black text-white">
+                {modes.reduce((sum, m) => sum + (m.stats?.totalRuns || 0), 0)}
+              </div>
+              <div className="text-[#8E9297] text-xs mt-1">Total de Execuções</div>
+            </div>
+            <div>
+              <div className="text-3xl font-black text-[#10B981]">
+                {modes.reduce((sum, m) => sum + (m.stats?.totalItemsFound || 0), 0).toLocaleString()}
+              </div>
+              <div className="text-[#8E9297] text-xs mt-1">Total de Itens Capturados</div>
+            </div>
+            <div>
+              <div className="text-3xl font-black text-[#5865F2]">
+                {modes.reduce((sum, m) => sum + (m.stats?.totalItemsNew || 0), 0).toLocaleString()}
+              </div>
+              <div className="text-[#8E9297] text-xs mt-1">Novos Itens</div>
+            </div>
+            <div>
+              <div className="text-3xl font-black text-[#EF4444]">
+                {modes.reduce((sum, m) => sum + (m.stats?.totalErrors || 0), 0)}
+              </div>
+              <div className="text-[#8E9297] text-xs mt-1">Total de Erros</div>
+            </div>
+          </div>
         </div>
       )}
-
-      {/* Scrapers Table */}
-      <div className="bg-[#151A22] border border-[#272A31] rounded-3xl overflow-hidden">
-        {loading ? (
-          <div className="px-6 py-12 text-center text-[#454655] text-sm">Carregando scrapers...</div>
-        ) : (
-          <table className="w-full text-left">
-            <thead>
-              <tr className="border-b border-[#272A31] bg-[#0B0E14]/40">
-                <th className="px-6 py-4 text-[#8E9297] text-[10px] font-bold uppercase tracking-widest">Leiloeiro</th>
-                <th className="px-6 py-4 text-[#8E9297] text-[10px] font-bold uppercase tracking-widest">Status</th>
-                <th className="px-6 py-4 text-[#8E9297] text-[10px] font-bold uppercase tracking-widest">Última Execução</th>
-                <th className="px-6 py-4 text-[#8E9297] text-[10px] font-bold uppercase tracking-widest text-right">Lotes / Taxa</th>
-                <th className="px-6 py-4 text-[#8E9297] text-[10px] font-bold uppercase tracking-widest">Agendamento</th>
-                <th className="px-6 py-4 text-[#8E9297] text-[10px] font-bold uppercase tracking-widest text-center">Ações</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[#272A31]">
-              {scrapers.length === 0 && (
-                <tr>
-                  <td colSpan={6} className="px-6 py-8 text-center text-[#8E9297] text-sm">
-                    Nenhum scraper executado ainda. Configure o GitHub Actions para rodar automaticamente.
-                  </td>
-                </tr>
-              )}
-              {scrapers.map((s) => (
-                <tr key={s.id} className={`transition-colors hover:bg-[#2F3136]/10 ${s.status === "ERROR" ? "bg-[#EF4444]/5" : ""}`}>
-                  <td className="px-6 py-4">
-                    <p className="text-white font-bold text-sm">{s.name}</p>
-                    <p className="text-[#8E9297] text-[11px]">{s.url}</p>
-                  </td>
-                  <td className="px-6 py-4">
-                    {s.status === "ONLINE" && <span className="flex items-center gap-1.5 text-[#10B981] text-xs font-bold"><div className="w-1.5 h-1.5 rounded-full bg-[#10B981]"></div>ONLINE</span>}
-                    {s.status === "ERROR" && <span className="flex items-center gap-1.5 text-[#EF4444] text-xs font-bold"><div className="w-1.5 h-1.5 rounded-full bg-[#EF4444] animate-pulse"></div>ERROR</span>}
-                    {s.status === "PAUSED" && <span className="flex items-center gap-1.5 text-[#8E9297] text-xs font-bold"><div className="w-1.5 h-1.5 rounded-full bg-[#8E9297]"></div>PAUSADO</span>}
-                  </td>
-                  <td className="px-6 py-4 text-[#8E9297] text-xs">
-                    <span className="flex items-center gap-1"><Clock className="w-3 h-3" /> {s.lastRun}</span>
-                  </td>
-                  <td className="px-6 py-4 text-right">
-                    <p className="text-white text-sm font-bold tabular-nums">{s.lotsFound.toLocaleString()}</p>
-                    <p className={`text-xs font-bold ${s.status === "ERROR" ? "text-[#EF4444]" : "text-[#10B981]"}`}>{s.successRate}</p>
-                  </td>
-                  <td className="px-6 py-4 text-[#8E9297] text-xs font-mono">{s.schedule}</td>
-                  <td className="px-6 py-4">
-                    <div className="flex items-center justify-center gap-2">
-                      <button className="p-1.5 bg-[#10B981]/10 text-[#10B981] rounded-lg hover:bg-[#10B981]/20 transition-colors" title="Executar agora">
-                        <Play className="w-3 h-3" />
-                      </button>
-                      <button className="p-1.5 bg-[#EF4444]/10 text-[#EF4444] rounded-lg hover:bg-[#EF4444]/20 transition-colors" title="Pausar">
-                        <Square className="w-3 h-3" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-      {/* Add Scraper */}
-      <div className="bg-[#151A22] border border-dashed border-[#272A31] rounded-3xl p-8 text-center hover:border-[#5865F2]/50 transition-colors cursor-pointer group">
-        <CheckCircle2 className="w-8 h-8 text-[#454655] group-hover:text-[#5865F2] mx-auto mb-3 transition-colors" />
-        <p className="text-[#8E9297] text-sm font-medium group-hover:text-white transition-colors">Adicionar novo leiloeiro para monitoramento</p>
-      </div>
     </div>
   );
 }

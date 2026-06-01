@@ -6,8 +6,6 @@
 *.sql
 scraper*.log
 pdf-results/
-http-proxy-utils.js
-llm-gateway.js
 PLANILHAPENHOR.xlsm
 docs/
 scripts/
