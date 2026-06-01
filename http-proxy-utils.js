@@ -40,7 +40,7 @@ function initProxyPool() {
       const username = parts[0];
       const password = parts.slice(1).join('_');
       if (username && password) {
-        proxyPool.push(`http://${username}:${password}@proxy.webshare.io:80`);
+        proxyPool.push(`http://${username}:${password}@p.webshare.io:80/`);
       }
     }
   }
