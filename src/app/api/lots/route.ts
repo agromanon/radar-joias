@@ -134,7 +134,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Execute query — use range pagination for normal sorts, fetch all for bid_end sort
-    const { data: lots, error, count } = isBidEndSort
+    let { data: lots, error, count } = isBidEndSort
       ? await query.limit(500) // cap at 500 for bid_end sort to prevent OOM
       : await query.range(fromIdx, toIdx);
 
@@ -144,6 +144,31 @@ export async function GET(request: NextRequest) {
         { error: "Failed to fetch lots", details: error.message },
         { status: 500 }
       );
+    }
+
+    // For vendas: also fetch lots from completed auctions awaiting results (outcome_status=null)
+    // These are NOT in the was_sold=true query but should appear on vendas page
+    if (vendas) {
+      const { data: completedAuctionRows } = await svc
+        .from("auctions")
+        .select("id")
+        .eq("status", "COMPLETED");
+      const completedIds = completedAuctionRows?.map((a: any) => a.id) || [];
+
+      if (completedIds.length > 0 && page === 1) {
+        // On first page only: fetch completed auction lots (no pagination, capped at 200)
+        const { data: completedLots } = await svc
+          .from("lots")
+          .select(selectCols, { count: "estimated" })
+          .in("auction_id", completedIds)
+          .is("outcome_status", null)
+          .limit(200);
+
+        // Merge with was_sold lots, avoiding duplicates — awaiting results first, then sold
+        const soldIds = new Set((lots as any)?.map((l: any) => l.id) || []);
+        const extraLots = (completedLots || []).filter((l: any) => !soldIds.has(l.id));
+        lots = [...extraLots, ...(lots || [])].slice(0, limit) as any;
+      }
     }
 
     // Get unique auctioneers for filter dropdown (only when no other filters active to avoid full table scan)
