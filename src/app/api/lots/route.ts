@@ -369,7 +369,9 @@ export async function GET(request: NextRequest) {
       lotsWithSourceUrl = lotsWithSourceUrl.slice(fromIdx, fromIdx + limit);
     }
 
-    const totalSorted = count || 0;
+    // For leiloes: total should be the actual filtered count, not the pre-filter DB count
+    // The DB count doesn't account for post-fetch auction/city exclusion filters
+    const totalSorted = leiloes ? lotsWithSourceUrl.length : (count || 0);
 
     // Return response with pagination metadata
     return NextResponse.json({
