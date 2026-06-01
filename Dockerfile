@@ -7,12 +7,10 @@ RUN npm ci
 # ---- Build stage ----
 FROM node:20-slim AS builder
 WORKDIR /app
-# Force builder to re-evaluate .dockerignore changes by adding a cache-busting layer
-RUN echo "force-rebuild-$(date +%s)" > /tmp/force-rebuild
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-# Break BuildKit cache: modify a file timestamp after COPY so dependent layers re-run
-RUN touch -d "$(date +%Y-%m-%dT%H:%M:%S)" package.json
+# Break BuildKit layer cache by touching a file after COPY
+RUN touch package.json && echo "build-$(date +%s)" > /tmp/build_marker
 
 ENV NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL:-https://placeholder.supabase.co}
 ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY:-placeholder}
@@ -37,6 +35,7 @@ COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=builder --chown=nextjs:nodejs /app/node_modules ./node_modules
+COPY --from=builder /app/scraper.js /app/http-proxy-utils.js /app/llm-gateway.js ./
 
 USER nextjs
 
