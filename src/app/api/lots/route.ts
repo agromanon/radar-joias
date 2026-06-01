@@ -57,6 +57,7 @@ export async function GET(request: NextRequest) {
       query = query.is("outcome_status", null);
       query = query.eq("enrichment_status", "enriched");
       query = query.not("valor", "is", null);
+      // Note: completed auction exclusion is done post-fetch (see below)
     }
 
     // Vendas sold lots filters
@@ -144,6 +145,25 @@ export async function GET(request: NextRequest) {
         { error: "Failed to fetch lots", details: error.message },
         { status: 500 }
       );
+    }
+
+    // For leiloes: filter out lots from COMPLETED auctions (they go to vendas)
+    if (leiloes) {
+      const { data: completedAuctions } = await svc
+        .from("auctions")
+        .select("id, auction_code")
+        .eq("status", "COMPLETED");
+      const completedIds = completedAuctions?.map((a: any) => a.id) || [];
+      const completedCodes = new Set(completedAuctions?.map((a: any) => a.auction_code) || []);
+      if (completedIds.length > 0 || completedCodes.size > 0) {
+        lots = (lots || []).filter((l: any) => {
+          // Exclude if auction_id matches a completed auction
+          if (l.auction_id && completedIds.includes(l.auction_id)) return false;
+          // Exclude if co_leilao matches a completed auction_code
+          if (l.co_leilao && completedCodes.has(l.co_leilao)) return false;
+          return true;
+        }) as any;
+      }
     }
 
     // For vendas: also fetch lots from completed auctions awaiting results (outcome_status=null)
