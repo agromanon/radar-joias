@@ -154,6 +154,7 @@ export async function GET(request: NextRequest) {
       const { data: allAuctions } = await svc
         .from("auctions")
         .select("id, auction_code, status, result_date");
+      console.error("DEBUG leiloes filter: total lots before filter =", (lots || []).length, "auctions fetched =", allAuctions?.length || 0);
       // Exclude: status=COMPLETED OR result_date is in the past
       const excludeAuctionIds: number[] = [];
       const excludeAuctionCodes: Set<string> = new Set();
@@ -165,6 +166,7 @@ export async function GET(request: NextRequest) {
           }
         }
       }
+      console.error("DEBUG: excludeAuctionIds count =", excludeAuctionIds.length, "excludeAuctionCodes size =", excludeAuctionCodes.size);
       // Find cities whose latest bid_period ended before today
       const { data: latestPeriods } = await svc
         .from("bid_periods")
