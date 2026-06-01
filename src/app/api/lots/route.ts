@@ -161,21 +161,20 @@ export async function GET(request: NextRequest) {
         .from("auctions")
         .select("id, auction_code, status, result_date");
       // Exclude: status=COMPLETED OR result_date is in the past
-      // UNKNOWN auctions with null result_date are also excluded (inactive/unknown status)
+      // UNKNOWN with null result_date = track for city-based exclusion only
       const excludeAuctionIds: number[] = [];
       const excludeAuctionCodes: Set<string> = new Set();
-      const endedAuctionIds: number[] = []; // UNKNOWN with null result_date
+      const unknownAuctionIds: number[] = []; // UNKNOWN with null result_date
       if (allAuctions) {
         for (const a of allAuctions as any[]) {
           const isEnded = a.status === "COMPLETED" ||
-            (a.result_date && a.result_date < today) ||
-            (a.status === "UNKNOWN" && !a.result_date); // UNKNOWN with null result_date = inactive
+            (a.result_date && a.result_date < today);
           if (isEnded) {
             excludeAuctionIds.push(a.id);
             if (a.auction_code) excludeAuctionCodes.add(a.auction_code);
           }
           if (a.status === "UNKNOWN" && !a.result_date) {
-            endedAuctionIds.push(a.id);
+            unknownAuctionIds.push(a.id);
           }
         }
       }
@@ -213,7 +212,7 @@ export async function GET(request: NextRequest) {
         }
         // Exclude if city has no future bid periods AND (no auction_id OR auction is UNKNOWN with null result_date)
         // This handles orphan lots where auction wasn't properly closed but city's bidding window ended
-        if (l.city_id && endedCityIds.includes(l.city_id) && (!l.auction_id || (l.auction_id && endedAuctionIds.includes(l.auction_id)))) {
+        if (l.city_id && endedCityIds.includes(l.city_id) && (!l.auction_id || (l.auction_id && unknownAuctionIds.includes(l.auction_id)))) {
           console.error("DEBUG filter: excluding lot", l.id, "due to city", l.city_id, "with no future periods and auction is unknown/absent");
           return false;
         }
