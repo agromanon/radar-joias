@@ -10,7 +10,7 @@
  */
 
 import { URL } from 'url';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 
 // Proxy pool — initialized lazily on first call to getProxyUrl()
 let proxyIndex = 0;
@@ -88,7 +88,7 @@ async function curlFetch(url, proxyUrl, options = {}) {
   args.push('-k', url);
 
   try {
-    const result = execSync(args, { encoding: 'utf-8' });
+    const result = execFileSync(args, { encoding: 'utf-8' });
     return {
       ok: true,
       status: 200,
@@ -97,10 +97,10 @@ async function curlFetch(url, proxyUrl, options = {}) {
     };
   } catch (e) {
     const stderr = e.message || '';
-    if (stderr.includes('407')) {
+    if (stderr.includes('407') || e.status === 407) {
       return { ok: false, status: 407, text: () => Promise.resolve('Proxy auth required'), json: () => Promise.reject('Proxy auth required') };
     }
-    if (stderr.includes('403')) {
+    if (stderr.includes('403') || e.status === 403) {
       return { ok: false, status: 403, text: () => Promise.resolve('Forbidden'), json: () => Promise.reject('Forbidden') };
     }
     throw e;
