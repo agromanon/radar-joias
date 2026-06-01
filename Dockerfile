@@ -34,9 +34,7 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
 # Include scraper and its dependencies for cron jobs
-COPY --from=builder --chown=nextjs:nodejs /app/scraper.js ./
-COPY --from=builder --chown=nextjs:nodejs /app/http-proxy-utils.js ./
-COPY --from=builder --chown=nextjs:nodejs /app/llm-gateway.js ./
+COPY --from=builder --chown=nextjs:nodejs /app/scraper.js /app/http-proxy-utils.js /app/llm-gateway.js ./
 
 USER nextjs
 
