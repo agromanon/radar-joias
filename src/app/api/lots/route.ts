@@ -147,19 +147,22 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // For leiloes: filter out lots from COMPLETED auctions (they go to vendas)
+    // For leiloes: filter out lots from COMPLETED auctions OR auctions with result_date in the past
+    // (those auctions have ended bidding, results are pending/published → go to vendas)
     if (leiloes) {
       const { data: completedAuctions } = await svc
         .from("auctions")
-        .select("id, auction_code")
+        .select("id, auction_code, status, result_date")
         .eq("status", "COMPLETED");
+      const today = new Date().toISOString().split("T")[0];
+      // Completed IDs + IDs where result_date is in the past
       const completedIds = completedAuctions?.map((a: any) => a.id) || [];
-      const completedCodes = new Set(completedAuctions?.map((a: any) => a.auction_code) || []);
-      if (completedIds.length > 0 || completedCodes.size > 0) {
+      const pastResultIds = completedAuctions?.filter((a: any) => a.result_date && a.result_date < today).map((a: any) => a.id) || [];
+      const allExcludeIds = [...new Set([...completedIds, ...pastResultIds])];
+      const completedCodes = new Set(completedAuctions?.filter((a: any) => a.result_date && a.result_date < today).map((a: any) => a.auction_code) || []);
+      if (allExcludeIds.length > 0 || completedCodes.size > 0) {
         lots = (lots || []).filter((l: any) => {
-          // Exclude if auction_id matches a completed auction
-          if (l.auction_id && completedIds.includes(l.auction_id)) return false;
-          // Exclude if co_leilao matches a completed auction_code
+          if (l.auction_id && allExcludeIds.includes(l.auction_id)) return false;
           if (l.co_leilao && completedCodes.has(l.co_leilao)) return false;
           return true;
         }) as any;
