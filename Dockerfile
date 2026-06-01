@@ -11,6 +11,7 @@ WORKDIR /app
 RUN echo "force-rebuild-$(date +%s)" > /tmp/force-rebuild
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+RUN echo "=== BUILDER CONTENTS ===" && ls -la *.js *.ts *.tsx 2>/dev/null || echo "no js/ts/tsx at root" && ls -la src/ 2>/dev/null || true
 
 ENV NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL:-https://placeholder.supabase.co}
 ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY:-placeholder}
