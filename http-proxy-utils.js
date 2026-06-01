@@ -32,15 +32,40 @@ function initProxyPool() {
     proxyPool.push(...urls);
   }
 
-  // WebShare token → proxy URL
+  // WebShare token → individual proxy list from API
   if (process.env.PROXY_SERVICE === 'webshare') {
     const token = process.env.PROXY_URLS?.trim();
     if (token && !token.startsWith('http')) {
-      const parts = token.split('_');
-      const username = parts[0];
-      const password = parts.slice(1).join('_');
-      if (username && password) {
-        proxyPool.push(`http://${username}:${password}@p.webshare.io:80/`);
+      try {
+        // Fetch individual proxies from WebShare API
+        const apiRes = await fetch('https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page_size=100', {
+          headers: { 'Authorization': `Token ${token}` },
+        });
+        if (apiRes.ok) {
+          const data = await apiRes.json();
+          for (const p of data.results ?? []) {
+            if (p.valid) {
+              proxyPool.push(`http://${p.username}:${p.password}@${p.proxy_address}:${p.port}/`);
+            }
+          }
+        } else {
+          console.warn(`  WebShare API returned ${apiRes.status}, falling back to gateway`);
+          // Fallback: use gateway with username/password
+          const parts = token.split('_');
+          const username = parts[0];
+          const password = parts.slice(1).join('_');
+          if (username && password) {
+            proxyPool.push(`http://${username}:${password}@p.webshare.io:80/`);
+          }
+        }
+      } catch (e) {
+        console.warn(`  WebShare API error: ${e.message}, falling back to gateway`);
+        const parts = token.split('_');
+        const username = parts[0];
+        const password = parts.slice(1).join('_');
+        if (username && password) {
+          proxyPool.push(`http://${username}:${password}@p.webshare.io:80/`);
+        }
       }
     }
   }
@@ -85,6 +110,12 @@ async function buildProxyAgent(proxyUrl) {
 // Max retries per fetch — tries different proxy each time
 const MAX_PROXY_RETRIES = 3;
 
+// p.webshare.io rotating proxy with IP auth — 403 means the gateway itself is blocked
+const isRotatingGateway = (proxyUrl) => {
+  const u = parseProxyUrl(proxyUrl);
+  return u?.hostname === 'p.webshare.io';
+};
+
 export async function proxiedFetch(url, options = {}) {
   initProxyPool();
 
@@ -108,8 +139,8 @@ export async function proxiedFetch(url, options = {}) {
     try {
       const res = await fetch(url, fetchOptions);
 
-      // Retry on 403 (blocked proxy) or 429 (rate limit) with a different proxy
-      if ((res.status === 403 || res.status === 429) && attempt < MAX_PROXY_RETRIES - 1) {
+      // Don't retry p.webshare.io rotating gateway on 403/429 — it's blocked at the gateway level
+      if ((res.status === 403 || res.status === 429) && !isRotatingGateway(proxyUrl) && attempt < MAX_PROXY_RETRIES - 1) {
         const u2 = parseProxyUrl(proxyUrl);
         console.warn(`  [proxy] ${u2?.hostname ?? proxyUrl} returned ${res.status}, trying next proxy...`);
         proxyIndex++; // Advance to next proxy for next attempt
