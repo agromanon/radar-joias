@@ -2,7 +2,7 @@
  * Proxy rotation module
  * Supports:
  *  - Manual proxy list (PROXY_URLS env var, comma-separated)
- *  - WebShare via PROXY_SERVICE=webshare + PROXY_URLS=token
+ *  - WebShare via PROXY_SERVICE=webshare + PROXY_URLS=token (fetches individual proxies from API)
  *
  * NOTE: ProxyAgent is imported lazily inside buildProxyAgent() to prevent
  * proxy-agent v8 from patching globalThis.fetch, which would break
@@ -16,7 +16,15 @@ let proxyIndex = 0;
 let proxyPool = [];
 let initialized = false;
 
-function initProxyPool() {
+function parseProxyUrl(raw) {
+  try {
+    return new URL(raw);
+  } catch {
+    return null;
+  }
+}
+
+async function initProxyPool() {
   if (initialized) return;
   initialized = true;
   proxyPool = [];
@@ -50,7 +58,6 @@ function initProxyPool() {
           }
         } else {
           console.warn(`  WebShare API returned ${apiRes.status}, falling back to gateway`);
-          // Fallback: use gateway with username/password
           const parts = token.split('_');
           const username = parts[0];
           const password = parts.slice(1).join('_');
@@ -81,22 +88,6 @@ function initProxyPool() {
   }
 }
 
-function parseProxyUrl(raw) {
-  try {
-    return new URL(raw);
-  } catch {
-    return null;
-  }
-}
-
-function getProxyUrl() {
-  initProxyPool();
-  if (proxyPool.length === 0) return null;
-  const url = proxyPool[proxyIndex % proxyPool.length];
-  proxyIndex++;
-  return url;
-}
-
 async function buildProxyAgent(proxyUrl) {
   if (!proxyUrl) return null;
   const { ProxyAgent } = await import('proxy-agent');
@@ -107,7 +98,6 @@ async function buildProxyAgent(proxyUrl) {
 // FETCH WITH PROXY (used by scraper for CAIXA API calls)
 // ============================================================
 
-// Max retries per fetch — tries different proxy each time
 const MAX_PROXY_RETRIES = 3;
 
 // p.webshare.io rotating proxy with IP auth — 403 means the gateway itself is blocked
@@ -117,7 +107,7 @@ const isRotatingGateway = (proxyUrl) => {
 };
 
 export async function proxiedFetch(url, options = {}) {
-  initProxyPool();
+  await initProxyPool();
 
   if (proxyPool.length === 0) {
     return fetch(url, options);
@@ -143,7 +133,7 @@ export async function proxiedFetch(url, options = {}) {
       if ((res.status === 403 || res.status === 429) && !isRotatingGateway(proxyUrl) && attempt < MAX_PROXY_RETRIES - 1) {
         const u2 = parseProxyUrl(proxyUrl);
         console.warn(`  [proxy] ${u2?.hostname ?? proxyUrl} returned ${res.status}, trying next proxy...`);
-        proxyIndex++; // Advance to next proxy for next attempt
+        proxyIndex++;
         continue;
       }
 
