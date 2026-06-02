@@ -88,6 +88,21 @@ function initProxyPool() {
   initialized = true;
   proxyPool = [];
 
+  // If SUPABASE_URL is available, prefer DB pool over PROXY_URLS
+  // (DB pool is tested against CAIXA, PROXY_URLS is unvalidated)
+  const hasDbCredentials = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+  if (hasDbCredentials && !process.env.PROXY_URLS_FORCE) {
+    if (!process.env.PROXY_URLS) {
+      console.warn('[proxy] SUPABASE_URL available — waiting for DB pool init instead of PROXY_URLS');
+      return;
+    }
+    if (process.env.PROXY_URLS === 'http://p.webshare.io:9999/') {
+      // Rotating proxy is unreliable — skip it, let DB pool handle it
+      console.warn('[proxy] Skipping p.webshare.io rotating proxy — will use DB pool instead');
+      return;
+    }
+  }
+
   if (process.env.PROXY_URLS) {
     const urls = process.env.PROXY_URLS.split(',')
       .map(u => u.trim())
@@ -111,8 +126,6 @@ function initProxyPool() {
       }
     }
   } else {
-    // No PROXY_URLS env var — async init from DB will be done by scraper calling setProxyPool()
-    // For synchronous first call, fall back to direct connection until scraper sets pool
     console.warn('[proxy] PROXY_URLS not set — scraper should call setProxyPool() before use');
   }
 }
@@ -192,7 +205,15 @@ async function curlFetch(url, proxyUrl, options = {}) {
 
 // Lazy DB load — only used if no PROXY_URLS env var and scraper didn't call setProxyPool()
 async function ensureProxyPool() {
-  if (dbInitialized || initialized) return; // already loaded via env or setProxyPool
+  if (dbInitialized) return;
+  if (!initialized) {
+    initProxyPool(); // may early-return if DB path is preferred
+  }
+  if (proxyPool.length > 0) {
+    initialized = true;
+    return; // got proxies from PROXY_URLS
+  }
+  // proxyPool empty — load from DB
   await initDbProxyPool();
   initialized = true;
   dbInitialized = true;
