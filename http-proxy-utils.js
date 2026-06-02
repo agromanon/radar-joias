@@ -16,12 +16,14 @@ import { execFileSync } from 'child_process';
 let proxyIndex = 0;
 let proxyPool = [];
 let initialized = false;
+let dbInitialized = false;
 
 // Exported for external control (e.g. scraper loading from DB)
 export function setProxyPool(urls) {
   proxyPool = urls.filter(Boolean);
   proxyIndex = 0;
   initialized = true;
+  dbInitialized = true;
   if (proxyPool.length === 0) {
     console.warn('[proxy] Proxy pool empty — direct connection');
   } else {
@@ -45,33 +47,73 @@ function parseProxyUrl(raw) {
   }
 }
 
+async function initDbProxyPool() {
+  try {
+    const { createClient } = await import('@supabase/supabase-js');
+    const supabase = createClient(
+      process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY
+    );
+    const { data } = await supabase
+      .from('working_proxies')
+      .select('proxy_address, port, username, password')
+      .eq('status', 'active')
+      .eq('caixa_works', true)
+      .order('last_used_at', { ascending: true, nullsFirst: true });
+
+    if (!data || data.length === 0) {
+      console.warn('[proxy] No active working proxies in DB — direct connection');
+      return;
+    }
+
+    proxyPool = data.map(p => {
+      if (p.username && p.password) {
+        return `http://${p.username}:${p.password}@${p.proxy_address}:${p.port}`;
+      }
+      return `http://${p.proxy_address}:${p.port}`;
+    });
+
+    console.log(`[proxy] DB pool loaded with ${proxyPool.length} working proxy(ies)`);
+    for (const p of proxyPool) {
+      const u = parseProxyUrl(p);
+      console.log(`[proxy]   - ${u ? u.hostname : p}`);
+    }
+  } catch (e) {
+    console.warn(`[proxy] Failed to load DB pool: ${e.message} — direct connection`);
+  }
+}
+
 function initProxyPool() {
   if (initialized) return;
   initialized = true;
   proxyPool = [];
 
-  if (!process.env.PROXY_URLS) return;
+  if (process.env.PROXY_URLS) {
+    const urls = process.env.PROXY_URLS.split(',')
+      .map(u => u.trim())
+      .filter(Boolean);
 
-  const urls = process.env.PROXY_URLS.split(',')
-    .map(u => u.trim())
-    .filter(Boolean);
-
-  for (const url of urls) {
-    // Skip WebShare token format
-    if (url.includes('_') && !url.startsWith('http://') && !url.startsWith('https://')) {
-      continue;
+    for (const url of urls) {
+      // Skip WebShare token format
+      if (url.includes('_') && !url.startsWith('http://') && !url.startsWith('https://')) {
+        continue;
+      }
+      proxyPool.push(url);
     }
-    proxyPool.push(url);
-  }
 
-  if (proxyPool.length === 0) {
-    console.warn('No proxies configured — direct connection');
+    if (proxyPool.length === 0) {
+      console.warn('No proxies configured — direct connection');
+    } else {
+      console.log(`Proxy pool initialized with ${proxyPool.length} proxy(ies)`);
+      for (const p of proxyPool) {
+        const u = parseProxyUrl(p);
+        console.log(`  - ${u ? u.hostname : p}`);
+      }
+    }
   } else {
-    console.log(`Proxy pool initialized with ${proxyPool.length} proxy(ies)`);
-    for (const p of proxyPool) {
-      const u = parseProxyUrl(p);
-      console.log(`  - ${u ? u.hostname : p}`);
-    }
+    // No PROXY_URLS env var — async init from DB will be done by scraper calling setProxyPool()
+    // For synchronous first call, fall back to direct connection until scraper sets pool
+    console.warn('[proxy] PROXY_URLS not set — scraper should call setProxyPool() before use');
   }
 }
 
@@ -148,8 +190,16 @@ async function curlFetch(url, proxyUrl, options = {}) {
   }
 }
 
+// Lazy DB load — only used if no PROXY_URLS env var and scraper didn't call setProxyPool()
+async function ensureProxyPool() {
+  if (dbInitialized || initialized) return; // already loaded via env or setProxyPool
+  await initDbProxyPool();
+  initialized = true;
+  dbInitialized = true;
+}
+
 export async function proxiedFetch(url, options = {}) {
-  initProxyPool();
+  await ensureProxyPool();
 
   if (proxyPool.length === 0) {
     return fetch(url, options);
