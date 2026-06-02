@@ -94,6 +94,7 @@ function initProxyPool() {
     if (!process.env.PROXY_URLS || process.env.PROXY_URLS === 'http://p.webshare.io:9999/') {
       // No PROXY_URLS or rotating proxy — will load from DB in ensureProxyPool()
       console.warn('[proxy] Will use DB proxy pool (SUPABASE_URL available, PROXY_URLS skipped)');
+      initialized = true;
       return;
     }
   }
@@ -144,6 +145,11 @@ async function curlFetch(url, proxyUrl, options = {}) {
   const proxyPort = u?.port ?? '80';
 
   const args = ['-s', '--max-time', '30', '--proxy', `http://${proxyHost}:${proxyPort}/`];
+
+  // If credentials embedded in URL (http://user:pass@host:port/), pass to curl
+  if (u?.username && u?.password) {
+    args.push('--proxy-user', `${u.username}:${u.password}`);
+  }
 
   const headers = { ...options.headers };
   if (!headers['accept']) headers['accept'] = 'application/json';
@@ -251,7 +257,7 @@ export async function proxiedFetch(url, options = {}) {
 
       if ((res.status === 403 || res.status === 429) && attempt < MAX_PROXY_RETRIES - 1) {
         console.warn(`  [proxy] ${u?.hostname ?? proxyUrl} returned ${res.status}, trying next proxy...`);
-        proxyIndex++;
+        proxyIndex += attempt + 1; // advance past failed proxy
         continue;
       }
 
@@ -266,7 +272,7 @@ export async function proxiedFetch(url, options = {}) {
           const curlRes = await curlFetch(url, proxyUrl, options);
           if (curlRes.ok) return curlRes;
           if (attempt < MAX_PROXY_RETRIES - 1) {
-            proxyIndex++;
+            proxyIndex += attempt + 1;
             continue;
           }
           return curlRes;
@@ -277,7 +283,7 @@ export async function proxiedFetch(url, options = {}) {
 
       if (attempt < MAX_PROXY_RETRIES - 1) {
         console.warn(`  [proxy] ${u?.hostname ?? proxyUrl} failed: ${e.message}, trying next proxy...`);
-        proxyIndex++;
+        proxyIndex += attempt + 1;
       }
     }
   }
