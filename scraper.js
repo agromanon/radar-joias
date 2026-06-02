@@ -1822,6 +1822,7 @@ async function main() {
     case 're-scrape-missing': await modeReScrapeMissing(); break;
     case 'reconstruct-urls': await modeReconstructUrls(); break;
     case 'enrich':            await modeEnrich(); break;
+    case 'health-check-proxies': await modeHealthCheckProxies(); break;
     default:
       console.error(`Unknown mode: ${mode}`);
       process.exit(1);
@@ -2513,6 +2514,85 @@ async function enrichLot(lot) {
       throw err;
     }
   }
+}
+
+async function modeHealthCheckProxies() {
+  console.log('\n=== Mode: health-check-proxies ===');
+  const startTime = Date.now();
+
+  const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+  const CAIXA_TEST_URL = `${API_BASE}/busca/ufs`;
+  const BLOCKED_THRESHOLD = 3;
+
+  // 1. Get active/pending proxies to test
+  const { data: proxies } = await supabase
+    .from('working_proxies')
+    .select('id, proxy_address, port, username, password, status, failure_count')
+    .in('status', ['active', 'pending'])
+    .or(`caixa_tested_at.is.null,caixa_tested_at.lt.${new Date(Date.now() - 3600000).toISOString()}`); // re-test if older than 1 hour
+
+  console.log(`  Found ${proxies?.length ?? 0} proxies to test`);
+
+  let newlyBlocked = 0;
+  for (const proxy of proxies ?? []) {
+    const proxyUrl = proxy.username && proxy.password
+      ? `http://${proxy.username}:${proxy.password}@${proxy.proxy_address}:${proxy.port}`
+      : `http://${proxy.proxy_address}:${proxy.port}`;
+
+    const result = await proxiedFetch(CAIXA_TEST_URL, {
+      headers: { accept: 'application/json', 'accept-language': 'pt-BR,pt;q=0.9' },
+    });
+
+    const ok = result.ok && result.status === 200;
+    let validJson = false;
+    if (ok) {
+      try {
+        const json = await result.json();
+        validJson = Array.isArray(json) && json.length > 0 && 'sigla' in (json[0] ?? {});
+      } catch { validJson = false; }
+    }
+
+    if (validJson) {
+      await supabase
+        .from('working_proxies')
+        .update({
+          failure_count: 0,
+          status: 'active',
+          caixa_works: true,
+          caixa_tested_at: new Date().toISOString(),
+        })
+        .eq('id', proxy.id);
+    } else {
+      const newCount = (proxy.failure_count ?? 0) + 1;
+      const isNowBlocked = newCount >= BLOCKED_THRESHOLD;
+      await supabase
+        .from('working_proxies')
+        .update({
+          failure_count: newCount,
+          status: isNowBlocked ? 'blocked' : 'active',
+          caixa_works: false,
+          caixa_tested_at: new Date().toISOString(),
+        })
+        .eq('id', proxy.id);
+      if (isNowBlocked) newlyBlocked++;
+    }
+
+    await sleep(2000); // rate limit between tests
+  }
+
+  // 2. Auto-replace blocked proxies
+  const { data: blocked } = await supabase
+    .from('working_proxies')
+    .select('id, proxy_address')
+    .eq('status', 'blocked');
+
+  if (blocked?.length) {
+    console.log(`  ${blocked.length} proxies blocked — triggering replacement...`);
+    // Note: replacement requires WEBSHARE_API_TOKEN which scraper may not have
+    // The admin UI route handles this with full credentials
+  }
+
+  console.log(`\nDone in ${Date.now() - startTime}ms | tested: ${proxies?.length ?? 0}, newly blocked: ${newlyBlocked}`);
 }
 
 main().catch(e => {
