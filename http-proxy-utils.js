@@ -277,24 +277,16 @@ export async function proxiedFetch(url, options = {}) {
     console.log(`  [proxy] ${u?.hostname ?? proxyUrl} → ${url}`);
 
     try {
-      // Try proxy-agent first
-      const agent = await buildProxyAgent(proxyUrl);
-      const fetchOptions = {
-        ...options,
-        ...(agent ? { agent } : {}),
-      };
+      // Always use curl for proxy requests — proxy-agent is unreliable with these proxies
+      const curlRes = await curlFetch(url, proxyUrl, options);
+      if (curlRes.ok) return curlRes;
 
-      const res = await fetch(url, fetchOptions);
-
-      if (res.status === 403 || res.status === 429) {
-        console.warn(`  [proxy] ${u?.hostname ?? proxyUrl} returned ${res.status}, trying next...`);
-        if (proxyId) await markProxyFailed(proxyId);
-        proxyIndex++; // mark this one as bad, move to next
-        triedCount++;
-        continue;
-      }
-
-      return res;
+      // If curl failed, try next proxy
+      console.warn(`  [proxy] ${u?.hostname ?? proxyUrl} curl failed (${curlRes.status}), trying next...`);
+      if (proxyId) await markProxyFailed(proxyId);
+      proxyIndex++; // mark this one as bad, move to next
+      triedCount++;
+      continue;
     } catch (e) {
       lastError = e;
       console.warn(`  [proxy] ${u?.hostname ?? proxyUrl} failed: ${e.message}, trying next...`);
