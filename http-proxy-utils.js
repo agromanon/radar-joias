@@ -228,8 +228,12 @@ export async function proxiedFetch(url, options = {}) {
   }
 
   let lastError;
-  for (let attempt = 0; attempt < MAX_PROXY_RETRIES; attempt++) {
-    const proxyUrl = proxyPool[(proxyIndex + attempt) % proxyPool.length];
+  let triedCount = 0;
+
+  // Try each proxy in sequence until one works
+  while (triedCount < proxyPool.length) {
+    const idx = proxyIndex % proxyPool.length;
+    const proxyUrl = proxyPool[idx];
     const u = parseProxyUrl(proxyUrl);
     console.log(`  [proxy] ${u?.hostname ?? proxyUrl} → ${url}`);
 
@@ -243,48 +247,19 @@ export async function proxiedFetch(url, options = {}) {
 
       const res = await fetch(url, fetchOptions);
 
-      // If 403 from p.webshare.io, fall back to curl
-      if (res.status === 403 && u?.hostname === 'p.webshare.io') {
-        console.warn(`  [proxy] p.webshare.io returned 403, trying curl fallback...`);
-        const curlRes = await curlFetch(url, proxyUrl, options);
-        if (curlRes.ok) return curlRes;
-        if (attempt < MAX_PROXY_RETRIES - 1) {
-          proxyIndex++;
-          continue;
-        }
-        return curlRes;
-      }
-
-      if ((res.status === 403 || res.status === 429) && attempt < MAX_PROXY_RETRIES - 1) {
-        console.warn(`  [proxy] ${u?.hostname ?? proxyUrl} returned ${res.status}, trying next proxy...`);
-        proxyIndex += attempt + 1; // advance past failed proxy
+      if (res.status === 403 || res.status === 429) {
+        console.warn(`  [proxy] ${u?.hostname ?? proxyUrl} returned ${res.status}, trying next...`);
+        proxyIndex++; // mark this one as bad, move to next
+        triedCount++;
         continue;
       }
 
       return res;
     } catch (e) {
       lastError = e;
-
-      // If proxy-agent fails with network error and it's p.webshare.io, try curl
-      if (u?.hostname === 'p.webshare.io') {
-        console.warn(`  [proxy] proxy-agent failed for p.webshare.io: ${e.message}, trying curl...`);
-        try {
-          const curlRes = await curlFetch(url, proxyUrl, options);
-          if (curlRes.ok) return curlRes;
-          if (attempt < MAX_PROXY_RETRIES - 1) {
-            proxyIndex += attempt + 1;
-            continue;
-          }
-          return curlRes;
-        } catch (curlErr) {
-          lastError = curlErr;
-        }
-      }
-
-      if (attempt < MAX_PROXY_RETRIES - 1) {
-        console.warn(`  [proxy] ${u?.hostname ?? proxyUrl} failed: ${e.message}, trying next proxy...`);
-        proxyIndex += attempt + 1;
-      }
+      console.warn(`  [proxy] ${u?.hostname ?? proxyUrl} failed: ${e.message}, trying next...`);
+      proxyIndex++; // mark this one as bad, move to next
+      triedCount++;
     }
   }
 
