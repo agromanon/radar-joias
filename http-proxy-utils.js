@@ -19,8 +19,9 @@ let initialized = false;
 let dbInitialized = false;
 
 // Exported for external control (e.g. scraper loading from DB)
-export function setProxyPool(urls) {
-  proxyPool = urls.filter(Boolean);
+export function setProxyPool(entries) {
+  // Support both array of strings (backwards compat) and array of {id, url} objects
+  proxyPool = entries.map(e => typeof e === 'string' ? e : { id: e.id, url: e.url });
   proxyIndex = 0;
   initialized = true;
   dbInitialized = true;
@@ -29,8 +30,9 @@ export function setProxyPool(urls) {
   } else {
     console.log(`[proxy] Pool set with ${proxyPool.length} proxy(ies)`);
     for (const p of proxyPool) {
-      const u = parseProxyUrl(p);
-      console.log(`[proxy]   - ${u ? u.hostname : p}`);
+      const entry = typeof p === 'string' ? p : p.url;
+      const u = parseProxyUrl(entry);
+      console.log(`[proxy]   - ${u ? u.hostname : entry}`);
     }
   }
 }
@@ -56,7 +58,7 @@ async function initDbProxyPool() {
     );
     const { data } = await supabase
       .from('working_proxies')
-      .select('proxy_address, port, username, password')
+      .select('id, proxy_address, port, username, password')
       .eq('status', 'active')
       .eq('caixa_works', true)
       .order('last_used_at', { ascending: true, nullsFirst: true });
@@ -66,15 +68,56 @@ async function initDbProxyPool() {
       return;
     }
 
-    proxyPool = data.map(p => {
-      if (p.username && p.password) {
-        return `http://${p.username}:${p.password}@${p.proxy_address}:${p.port}`;
-      }
-      return `http://${p.proxy_address}:${p.port}`;
-    });
+    proxyPool = data.map(p => ({
+      id: p.id,
+      url: p.username && p.password
+        ? `http://${p.username}:${p.password}@${p.proxy_address}:${p.port}`
+        : `http://${p.proxy_address}:${p.port}`,
+    }));
 
     console.log(`[proxy] DB pool loaded with ${proxyPool.length} working proxy(ies)`);
     for (const p of proxyPool) {
+      console.log(`[proxy]   - id=${p.id} ${p.url}`);
+    }
+  } catch (e) {
+    console.warn(`[proxy] Failed to load DB pool: ${e.message} — direct connection`);
+  }
+}
+
+// Mark a proxy as failed in DB (called on 403/error at runtime)
+async function markProxyFailed(proxyId) {
+  if (!proxyId) return;
+  try {
+    const { createClient } = await import('@supabase/supabase-js');
+    const supabase = createClient(
+      process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY
+    );
+    // Get current failure_count
+    const { data } = await supabase
+      .from('working_proxies')
+      .select('failure_count')
+      .eq('id', proxyId)
+      .single();
+
+    const newCount = (data?.failure_count ?? 0) + 1;
+    const isNowBlocked = newCount >= 3;
+
+    await supabase
+      .from('working_proxies')
+      .update({
+        failure_count: newCount,
+        status: isNowBlocked ? 'blocked' : 'active',
+        caixa_works: false,
+        last_failure_at: new Date().toISOString(),
+      })
+      .eq('id', proxyId);
+
+    console.warn(`[proxy] Marked proxy id=${proxyId} failed (count=${newCount}, blocked=${isNowBlocked})`);
+  } catch (e) {
+    console.warn(`[proxy] Failed to mark proxy ${proxyId} as failed: ${e.message}`);
+  }
+}
       const u = parseProxyUrl(p);
       console.log(`[proxy]   - ${u ? u.hostname : p}`);
     }
@@ -233,7 +276,10 @@ export async function proxiedFetch(url, options = {}) {
   // Try each proxy in sequence until one works
   while (triedCount < proxyPool.length) {
     const idx = proxyIndex % proxyPool.length;
-    const proxyUrl = proxyPool[idx];
+    const entry = proxyPool[idx];
+    // Support both old format (string) and new format ({id, url})
+    const proxyUrl = typeof entry === 'string' ? entry : entry.url;
+    const proxyId = typeof entry === 'object' ? entry.id : null;
     const u = parseProxyUrl(proxyUrl);
     console.log(`  [proxy] ${u?.hostname ?? proxyUrl} → ${url}`);
 
@@ -249,6 +295,7 @@ export async function proxiedFetch(url, options = {}) {
 
       if (res.status === 403 || res.status === 429) {
         console.warn(`  [proxy] ${u?.hostname ?? proxyUrl} returned ${res.status}, trying next...`);
+        if (proxyId) await markProxyFailed(proxyId);
         proxyIndex++; // mark this one as bad, move to next
         triedCount++;
         continue;
@@ -258,6 +305,7 @@ export async function proxiedFetch(url, options = {}) {
     } catch (e) {
       lastError = e;
       console.warn(`  [proxy] ${u?.hostname ?? proxyUrl} failed: ${e.message}, trying next...`);
+      if (proxyId) await markProxyFailed(proxyId);
       proxyIndex++; // mark this one as bad, move to next
       triedCount++;
     }
