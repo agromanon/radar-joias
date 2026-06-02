@@ -4,7 +4,7 @@
  * it returns valid JSON with the expected state list.
  */
 
-import { HttpsProxyAgent } from 'proxy-agent';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 
 const CAIXA_TEST_URL = 'https://servicebus2.caixa.gov.br/vitrinedejoias/api/busca/ufs';
 
