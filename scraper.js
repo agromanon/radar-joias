@@ -1823,6 +1823,7 @@ async function main() {
     case 'reconstruct-urls': await modeReconstructUrls(); break;
     case 'enrich':            await modeEnrich(); break;
     case 'health-check-proxies': await modeHealthCheckProxies(); break;
+    case 'scrape-with-pool':     await modeScrapeWithPool(); break;
     default:
       console.error(`Unknown mode: ${mode}`);
       process.exit(1);
@@ -2593,6 +2594,54 @@ async function modeHealthCheckProxies() {
   }
 
   console.log(`\nDone in ${Date.now() - startTime}ms | tested: ${proxies?.length ?? 0}, newly blocked: ${newlyBlocked}`);
+}
+
+// ============================================================
+// SCRAPE WITH DB PROXY POOL
+// Loads working proxies from working_proxies table, rotates through them.
+// Use this as default scraping mode instead of PROXY_URLS env var.
+// ============================================================
+
+async function loadProxyPoolFromDb() {
+  const { data } = await supabase
+    .from('working_proxies')
+    .select('proxy_address, port, username, password')
+    .eq('status', 'active')
+    .eq('caixa_works', true)
+    .order('last_used_at', { ascending: true, nullsFirst: true });
+
+  if (!data || data.length === 0) {
+    console.warn('[pool] No active working proxies in DB — will try direct connection');
+    return [];
+  }
+
+  return data.map(p => {
+    if (p.username && p.password) {
+      return `http://${p.username}:${p.password}@${p.proxy_address}:${p.port}`;
+    }
+    return `http://${p.proxy_address}:${p.port}`;
+  });
+}
+
+async function modeScrapeWithPool() {
+  console.log('\n=== Mode: scrape-with-pool ===');
+  const pool = await loadProxyPoolFromDb();
+
+  if (pool.length === 0) {
+    console.warn('[pool] No proxies available, scraping without proxy');
+  }
+
+  // Set the proxy pool for http-proxy-utils
+  const { setProxyPool } = await import('./http-proxy-utils.js');
+  setProxyPool(pool);
+
+  console.log(`[pool] Loaded ${pool.length} working proxies`);
+
+  // Now run active-lots scraping with this pool
+  await modeActiveLots();
+
+  // After scraping, mark proxies as used (optional: update last_used_at via API)
+  console.log('[pool] Scrape complete');
 }
 
 main().catch(e => {

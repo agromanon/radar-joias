@@ -17,6 +17,26 @@ let proxyIndex = 0;
 let proxyPool = [];
 let initialized = false;
 
+// Exported for external control (e.g. scraper loading from DB)
+export function setProxyPool(urls) {
+  proxyPool = urls.filter(Boolean);
+  proxyIndex = 0;
+  initialized = true;
+  if (proxyPool.length === 0) {
+    console.warn('[proxy] Proxy pool empty — direct connection');
+  } else {
+    console.log(`[proxy] Pool set with ${proxyPool.length} proxy(ies)`);
+    for (const p of proxyPool) {
+      const u = parseProxyUrl(p);
+      console.log(`[proxy]   - ${u ? u.hostname : p}`);
+    }
+  }
+}
+
+export function getProxyPool() {
+  return proxyPool;
+}
+
 function parseProxyUrl(raw) {
   try {
     return new URL(raw);
