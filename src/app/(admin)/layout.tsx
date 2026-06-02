@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, Users, Database, Bell, ShieldAlert,
-  BarChart3, LogOut, Cpu, CreditCard, Crown, Menu, X, Settings, User, ExternalLink, Home
+  BarChart3, LogOut, Cpu, CreditCard, Crown, Menu, X, Settings, User, ExternalLink, Home, Shield
 } from "lucide-react";
 import { useUser } from "@/hooks/useUser";
 
@@ -13,6 +13,7 @@ const NAV = [
   { href: "/admin", icon: LayoutDashboard, label: "Dashboard", iconColor: "text-[#EF4444]" },
   { href: "/admin/llm", icon: Cpu, label: "Gateway LLM" },
   { href: "/admin/scrapers", icon: Database, label: "Robôs Scrapers" },
+  { href: "/admin/proxies", icon: Shield, label: "Proxy Pool" },
   { href: "/admin/users", icon: Users, label: "Gestão de Usuários" },
   { href: "/admin/plans", icon: Crown, label: "Planos" },
   { href: "/admin/payments", icon: CreditCard, label: "Pagamentos" },
