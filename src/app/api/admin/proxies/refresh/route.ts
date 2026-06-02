@@ -7,7 +7,7 @@
 import { createServerClient } from '@supabase/ssr'
 import { cookies } from 'next/headers'
 import { NextRequest, NextResponse } from 'next/server'
-import { listProxies } from '@/lib/proxy/webshare'
+import { listProxies, createReplacement, pollReplacement } from '@/lib/proxy/webshare'
 import {
   upsertProxy,
   getPoolStats,
@@ -15,6 +15,9 @@ import {
   recordProxySuccess,
   recordProxyFailure,
   logProxyTest,
+  getBlockedProxies,
+  markProxiesReplacing,
+  markProxiesPending,
 } from '@/lib/proxy/pool'
 import { testProxyAgainstCaixa } from '@/lib/proxy/caixa-tester'
 
@@ -102,12 +105,62 @@ export async function POST(request: NextRequest) {
 
     const stats = await getPoolStats();
 
+    // 5. Auto-replace blocked proxies if any exist
+    let replacedCount = 0;
+    let newProxiesAdded = 0;
+    const blocked = await getBlockedProxies();
+
+    if (blocked.length > 0) {
+      try {
+        const ipAddresses = blocked.map(p => p.proxy_address);
+        await markProxiesReplacing(blocked.map(p => p.id));
+
+        const replacement = await createReplacement({
+          to_replace: { type: 'ip_address', ip_addresses: ipAddresses },
+          replace_with: { type: 'any', count: blocked.length },
+        });
+
+        const finalReplacement = await pollReplacement(replacement.id);
+
+        if (finalReplacement.state === 'completed') {
+          // Re-fetch updated proxy list from WebShare
+          const newProxies = await listProxies();
+          const replacedSet = new Set(ipAddresses);
+          const added = newProxies.filter(p => !replacedSet.has(p.proxy_address));
+
+          for (const p of added) {
+            await upsertProxy({
+              id: String(p.id),
+              proxy_address: p.proxy_address,
+              port: p.port,
+              username: p.username,
+              password: p.password,
+            });
+            newProxiesAdded++;
+          }
+
+          // Reset old blocked proxies to pending for re-testing
+          await markProxiesPending(blocked.map(p => p.id));
+          replacedCount = blocked.length;
+        } else {
+          // Replacement failed — reset proxies to blocked
+          await markProxiesPending(blocked.map(p => p.id));
+        }
+      } catch (e) {
+        console.error('Auto-replace failed:', e);
+      }
+    }
+
+    const finalStats = await getPoolStats();
+
     return NextResponse.json({
-      refreshed: stats.total,
+      refreshed: finalStats.total,
       fetchedFromWebShare: webshareProxies.length,
       tested: testedIds.length,
       newlyActive,
       newlyBlocked,
+      replaced: replacedCount,
+      newProxiesAdded,
       durationMs: Date.now() - startTime,
     })
   } catch (error) {
