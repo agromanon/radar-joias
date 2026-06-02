@@ -30,7 +30,7 @@ ENV NODE_ENV=production
 
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs && \
-    apt-get update && apt-get install -y --no-install-recommends curl && \
+    apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/public ./public

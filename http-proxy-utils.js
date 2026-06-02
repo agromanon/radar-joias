@@ -83,7 +83,9 @@ async function curlFetch(url, proxyUrl, options = {}) {
     args.push('-H', `${key}: ${value}`);
   }
 
-  args.push('-k', url);
+  // -k: skip SSL verification (CAIXA uses self-signed cert)
+  // --ipv4: avoid IPv6 issues
+  args.push('-k', '--ipv4', url);
 
   try {
     const result = execFileSync('curl', args, { encoding: 'utf-8' });
