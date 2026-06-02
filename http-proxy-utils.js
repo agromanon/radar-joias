@@ -85,20 +85,15 @@ async function initDbProxyPool() {
 
 function initProxyPool() {
   if (initialized) return;
-  initialized = true;
   proxyPool = [];
 
   // If SUPABASE_URL is available, prefer DB pool over PROXY_URLS
   // (DB pool is tested against CAIXA, PROXY_URLS is unvalidated)
   const hasDbCredentials = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
   if (hasDbCredentials && !process.env.PROXY_URLS_FORCE) {
-    if (!process.env.PROXY_URLS) {
-      console.warn('[proxy] SUPABASE_URL available — waiting for DB pool init instead of PROXY_URLS');
-      return;
-    }
-    if (process.env.PROXY_URLS === 'http://p.webshare.io:9999/') {
-      // Rotating proxy is unreliable — skip it, let DB pool handle it
-      console.warn('[proxy] Skipping p.webshare.io rotating proxy — will use DB pool instead');
+    if (!process.env.PROXY_URLS || process.env.PROXY_URLS === 'http://p.webshare.io:9999/') {
+      // No PROXY_URLS or rotating proxy — will load from DB in ensureProxyPool()
+      console.warn('[proxy] Will use DB proxy pool (SUPABASE_URL available, PROXY_URLS skipped)');
       return;
     }
   }
