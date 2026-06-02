@@ -118,13 +118,6 @@ async function markProxyFailed(proxyId) {
     console.warn(`[proxy] Failed to mark proxy ${proxyId} as failed: ${e.message}`);
   }
 }
-      const u = parseProxyUrl(p);
-      console.log(`[proxy]   - ${u ? u.hostname : p}`);
-    }
-  } catch (e) {
-    console.warn(`[proxy] Failed to load DB pool: ${e.message} — direct connection`);
-  }
-}
 
 function initProxyPool() {
   if (initialized) return;
