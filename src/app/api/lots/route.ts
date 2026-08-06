@@ -50,7 +50,8 @@ export async function GET(request: NextRequest) {
       : "*, auction_id";
     let query = svc
       .from("lots")
-      .select(selectCols, { count: "exact" }); // Use exact count for correct pagination totals
+      .select(selectCols, { count: "planned" }); // Use Postgres stats (fast). The full count() scan
+                                       // is capped at 1000 by PostgREST, breaking pagination totals.
 
     // Leiloes active auction filters
     if (leiloes) {
@@ -167,14 +168,9 @@ export async function GET(request: NextRequest) {
       query = query.order(dbSortCol, { ascending: order === "asc" });
     }
 
-    // Execute query
-    // IMPORTANT: PostgREST's .range() is hard-capped at 1000 rows server-side.
-    // We use .limit(5000) + JS slicing since we already have count: 'exact'.
-    let { data: lots, error, count } = leiloes
-      ? await query.limit(5000) // /leiloes: fetch up to 5000, JS-slice for pagination
-      : isBidEndSort
-      ? await query.limit(5000) // bid_end sort: fetch all for in-memory sort
-      : await query.range(fromIdx, toIdx); // other sorts: use range pagination
+    // Execute query — use .range() for offset pagination, only the current page is fetched
+    // .count() with 'planned' uses Postgres statistics (instant, no row scan).
+    let { data: lots, error, count } = await query.range(fromIdx, toIdx);
     if (error) {
       console.error("Error fetching lots:", error);
       return NextResponse.json(
