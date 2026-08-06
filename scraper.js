@@ -1860,6 +1860,7 @@ async function main() {
     case 'scrape-with-pool':     await modeScrapeWithPool(); break;
     case 'vitrine-active':       await modeVitrineActive(); break;
     case 'fetch-descriptions':   await modeFetchDescriptions(); break;
+    case 'backfill-bid-end':     await modeBackfillBidEnd(); break;
     default:
       console.error(`Unknown mode: ${mode}`);
       process.exit(1);
@@ -2918,6 +2919,93 @@ async function modeFetchDescriptions() {
   }
 
   process.stderr.write(`\nDone: ${totalUpdated} descriptions fetched, ${totalSkipped} skipped/failed\n`);
+}
+
+// Backfill bid_end_date for auctions where it's NULL.
+// Two strategies:
+//   1) Use existing result_date (most legacy lots have this set)
+//   2) Try lookup against cronograma for any remaining
+async function modeBackfillBidEnd() {
+  console.log('\n=== Mode: backfill-bid-end ===');
+  console.log('  Backfilling bid_end_date for auctions with NULL value');
+
+  // Find auctions with NULL bid_end_date
+  const { data: needs, error } = await supabase
+    .from('auctions')
+    .select('id, auction_code, result_date, status')
+    .is('bid_end_date', null)
+    .limit(500);
+  if (error) {
+    console.error('Query error:', error.message);
+    return;
+  }
+  if (!needs?.length) {
+    console.log('  No auctions need backfilling.');
+    return;
+  }
+  console.log(`  Found ${needs.length} auctions to backfill`);
+
+  // Strategy 1: direct fallback to result_date
+  let updated = 0;
+  for (const a of needs) {
+    if (a.result_date) {
+      const { error: uerr } = await supabase.from('auctions')
+        .update({
+          bid_end_date: a.result_date,
+          bid_start_date: a.result_date,
+        })
+        .eq('id', a.id);
+      if (!uerr) updated++;
+    }
+  }
+  console.log(`  Backfilled ${updated}/${needs.length} from result_date`);
+
+  // Strategy 2: try cronograma for any remaining NULL
+  const { data: remaining } = await supabase
+    .from('auctions')
+    .select('id, auction_code')
+    .is('bid_end_date', null)
+    .limit(500);
+  if (!remaining?.length) return;
+  console.log(`  ${remaining.length} still need cronograma lookup`);
+
+  const now = new Date();
+  const foundByCode = {};
+  for (let y = 2024; y <= now.getFullYear() + 1; y++) {
+    for (let m = (y === 2024 ? 10 : 1); m <= (y === now.getFullYear() + 1 ? now.getMonth() + 3 : 12); m++) {
+      if (Object.keys(foundByCode).length >= remaining.length) break;
+      const month = String(m).padStart(2, '0');
+      const url = `${PORTAL_API_BASE}/cronograma/${y}/${month}`;
+      try {
+        const res = await fetchJson(url, { headers: { ...STANDARD_HEADERS, accept: '*/*' } });
+        if (!res.ok) continue;
+        const data = await res.json();
+        for (const l of (data.leiloes || [])) {
+          if (l.leilao) foundByCode[l.leilao] = l;
+        }
+      } catch (e) {
+        // continue
+      }
+    }
+  }
+
+  let cronUpdated = 0;
+  for (const a of remaining) {
+    const info = foundByCode[a.auction_code];
+    if (!info?.dataDeLanceFim) continue;
+    const updates = {
+      bid_end_date: info.dataDeLanceFim.split('T')[0],
+      bid_start_date: info.dataDeLanceInicio?.split('T')[0] || null,
+    };
+    if (['Lance encerrado', 'Confirmado'].includes(info.situacao)) {
+      updates.status = 'COMPLETED';
+      updates.result_date = info.dataDeLanceFim.split('T')[0];
+    }
+    if (info.unidadeCentralizadora) updates.centralizer_unit = info.unidadeCentralizadora;
+    const { error: uerr } = await supabase.from('auctions').update(updates).eq('id', a.id);
+    if (!uerr) cronUpdated++;
+  }
+  console.log(`  Backfilled ${cronUpdated}/${remaining.length} from cronograma`);
 }
 
 main().catch(e => {
