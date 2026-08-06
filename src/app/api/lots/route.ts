@@ -341,10 +341,10 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // /leiloes: SQL filter + SQL sort + SQL pagination. count comes from Supabase.
-    // /vendas + bid_end sort: still use in-memory pagination (count via array length).
-    const isLeiloesPaginated = leiloes && !isBidEndSort;
-    const totalSorted = isLeiloesPaginated ? (count || 0) : lotsWithSourceUrl.length;
+    // /leiloes + /vendas: SQL filter + SQL sort + SQL pagination. count comes from Supabase.
+    // Only bid_end sort uses in-memory pagination (count via array length).
+    const isSqlPaginated = (leiloes || vendas) && !isBidEndSort;
+    const totalSorted = isSqlPaginated ? (count || 0) : lotsWithSourceUrl.length;
 
     if (isBidEndSort) {
       lotsWithSourceUrl = lotsWithSourceUrl.slice(fromIdx, fromIdx + limit);
