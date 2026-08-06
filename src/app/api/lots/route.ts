@@ -385,24 +385,25 @@ export async function GET(request: NextRequest) {
     // For leiloes non-bid_end sorts: slice to the requested range after filtering
     // (fetched 500 but filter may reject most, so we can't use DB range pagination)
     if (leiloes && !isBidEndSort) {
-      // Re-sort leiloes results by the requested order before slicing
       const ascending = order === "asc";
       if (sort === "price") {
         lotsWithSourceUrl.sort((a: any, b: any) => ascending
           ? (a.valor || 0) - (b.valor || 0)
           : (b.valor || 0) - (a.valor || 0));
       } else {
-        // Default: sort by id
         lotsWithSourceUrl.sort((a: any, b: any) => ascending
           ? a.id - b.id
-          : b.id - a.id);
+          : b.id - b.id);
       }
-      lotsWithSourceUrl = lotsWithSourceUrl.slice(fromIdx, fromIdx + limit);
     }
 
     // For leiloes: total should be the actual filtered count, not the pre-filter DB count
     // The DB count doesn't account for post-fetch auction/city exclusion filters
     const totalSorted = leiloes ? lotsWithSourceUrl.length : (count || 0);
+
+    if (leiloes && !isBidEndSort) {
+      lotsWithSourceUrl = lotsWithSourceUrl.slice(fromIdx, fromIdx + limit);
+    }
 
     // Return response with pagination metadata
     return NextResponse.json({
