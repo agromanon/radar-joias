@@ -19,6 +19,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { config } from 'dotenv';
 import { proxiedFetch } from './http-proxy-utils.js';
+import { execFileSync } from 'child_process';
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { llmCall } from './llm-gateway.js';
 import sharp from 'sharp';
@@ -37,6 +38,7 @@ const LLM_API_KEY = process.env.LLM_API_KEY;
 const LLM_PROVIDER = process.env.LLM_PROVIDER ?? 'anthropic';
 
 const API_BASE = 'https://servicebus2.caixa.gov.br/vitrinedejoias/api';
+const PORTAL_API_BASE = 'https://servicebus2.caixa.gov.br/portalvitrinedejoias/api';
 const IMG_BASE = 'https://servicebus2.caixa.gov.br/vitrinearquivos/fotos';
 
 const STANDARD_HEADERS = {
@@ -174,6 +176,38 @@ async function apiFetch(endpoint, params = {}) {
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// JSON-friendly fetch via Evomi proxy. Use this for JSON endpoints —
+// proxiedFetch() is PDF-only (it checks for %PDF magic bytes).
+async function fetchJson(url, options = {}) {
+  const proxyStr = process.env.PROXY_URLS?.split(',')[0]?.trim();
+  if (!proxyStr) return fetch(url, options);
+  const u = new URL(proxyStr);
+  const headers = { ...options.headers };
+  const args = ['-s', '--max-time', '90'];
+  if (u.hostname) {
+    args.push('--proxy', `${u.protocol}//${u.hostname}:${u.port || '80'}/`);
+    if (u.username && u.password) {
+      args.push('--proxy-user', `${u.username}:${u.password}`);
+    }
+  }
+  args.push('-k', '--ipv4', '-o', '/dev/stdout', '-w', '%{http_code}');
+  args.push('-X', options.method || 'GET');
+  if (options.body) args.push('-d', String(options.body));
+  for (const [k, v] of Object.entries(headers)) {
+    args.push('-H', `${k}: ${v}`);
+  }
+  args.push(url);
+  const buffer = execFileSync('curl', args, { maxBuffer: 100 * 1024 * 1024 });
+  const httpCode = parseInt(buffer.toString().slice(-3));
+  const body = buffer.slice(0, -3);
+  return {
+    ok: httpCode >= 200 && httpCode < 300,
+    status: httpCode,
+    text: () => Promise.resolve(body.toString()),
+    json: () => Promise.resolve(JSON.parse(body.toString())),
+  };
+}
 
 // ============================================================
 // PARSE HELPERS
@@ -1824,6 +1858,7 @@ async function main() {
     case 'enrich':            await modeEnrich(); break;
     case 'health-check-proxies': await modeHealthCheckProxies(); break;
     case 'scrape-with-pool':     await modeScrapeWithPool(); break;
+    case 'vitrine-active':       await modeVitrineActive(); break;
     default:
       console.error(`Unknown mode: ${mode}`);
       process.exit(1);
@@ -2642,6 +2677,114 @@ async function modeScrapeWithPool() {
 
   // After scraping, mark proxies as used (optional: update last_used_at via API)
   console.log('[pool] Scrape complete');
+}
+
+// ============================================================
+// MODE: VITRINE-ACTIVE
+// For each active/upcoming auction, scrape lots via /cronograma/contratos
+// Uses fetchJson (not proxiedFetch) since /contratos returns JSON, not PDF.
+// ============================================================
+
+async function modeVitrineActive() {
+  console.log('\n=== Mode: vitrine-active ===');
+  console.log('  Scraping lots for active/upcoming Vitrine auctions via /cronograma/contratos');
+
+  const today = new Date();
+  const todayStr = today.toISOString().split('T')[0];
+  const sixtyDaysAgo = new Date(today.getTime() - 1 * 86400000).toISOString().split('T')[0];
+  const sixtyDaysFuture = new Date(today.getTime() + 60 * 86400000).toISOString().split('T')[0];
+  const orFilter = `bid_end_date.gte.${sixtyDaysAgo},and(bid_start_date.lte.${sixtyDaysFuture},bid_end_date.gte.${todayStr})`;
+  console.log(`  Querying: bid_end_date>=${sixtyDaysAgo} OR (bid_start_date<=${sixtyDaysFuture} AND bid_end_date>=${todayStr})`);
+  const { data: auctions, error: queryError } = await supabase
+    .from('auctions')
+    .select(`
+      id, auction_code, status, bid_start_date, bid_end_date,
+      city_id,
+      cities(id, name, caixa_city_code)
+    `)
+    .or(orFilter)
+    .not('city_id', 'is', null)
+    .limit(50);
+
+  if (queryError) console.error('  Query error:', queryError.message);
+  console.log(`  Query returned ${auctions?.length ?? 0} auctions`);
+  if (!auctions?.length) return;
+
+  let totalInserted = 0;
+
+  for (const auction of auctions) {
+    const city = Array.isArray(auction.cities) ? auction.cities[0] : auction.cities;
+    if (!city) continue;
+
+    console.log(`\n  ${auction.auction_code} (${city.name})...`);
+    await sleep(300);
+
+    let page = 1, pageCount = 0, totalFromApi = null, pageFailures = 0;
+
+    while (true) {
+      try {
+        const url = `${PORTAL_API_BASE}/cronograma/contratos?coleilao=${encodeURIComponent(auction.auction_code)}&desc=false&sort=nuLote&valorInicial=0&valorFinal=0&limit=96&pagina=${page}`;
+        let res;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            res = await fetchJson(url, { headers: { ...STANDARD_HEADERS, accept: '*/*' } });
+            break;
+          } catch (e) {
+            if (attempt < 3) {
+              console.warn(`    Page ${page} attempt ${attempt} failed: ${e.message.slice(0,60)}, retrying...`);
+              await sleep(3000 * attempt);
+            } else throw e;
+          }
+        }
+        if (!res.ok) {
+          console.warn(`    Page ${page} HTTP ${res.status}`);
+          pageFailures++;
+          if (pageFailures >= 3) break;
+          await sleep(2000);
+          continue;
+        }
+        const data = await res.json();
+        const contratos = data.contratos ?? [];
+        if (totalFromApi === null) {
+          totalFromApi = data.totalRegistros ?? contratos.length;
+          console.log(`    Total: ${totalFromApi} contracts`);
+        }
+        if (contratos.length === 0) break;
+        pageCount += contratos.length;
+        pageFailures = 0;
+
+        const rows = contratos.map(c => ({
+          city_id: auction.city_id,
+          lot_number: c.lote,
+          contract_number: c.numeroContrato,
+          co_leilao: auction.auction_code,
+          valor: parseMoney(c.valor),
+          last_seen_at: new Date().toISOString(),
+        })).filter(r => r.lot_number && r.contract_number);
+
+        for (let i = 0; i < rows.length; i += 200) {
+          const chunk = rows.slice(i, i + 200);
+          const { error } = await supabase
+            .from('lots')
+            .upsert(chunk, { onConflict: 'city_id,lot_number', ignoreDuplicates: false, count: 'exact' });
+          if (error) console.warn(`    Upsert error: ${error.message}`);
+        }
+        totalInserted += rows.length;
+
+        if (contratos.length < 96 || page >= 50) break;
+        page++;
+        await sleep(1500);
+      } catch (e) {
+        console.warn(`    Page ${page} error: ${e.message.slice(0, 100)}`);
+        pageFailures++;
+        if (pageFailures >= 3) break;
+        await sleep(10000);
+      }
+    }
+    console.log(`    Processed ${pageCount}/${totalFromApi ?? '?'} contracts`);
+  }
+
+  console.log(`\nDone: ${totalInserted} lots upserted`);
 }
 
 main().catch(e => {

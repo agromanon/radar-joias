@@ -140,9 +140,9 @@ export async function GET(request: NextRequest) {
     // then slice to the requested range after filtering
     console.error("DEBUG: before query, fromIdx=", fromIdx, "toIdx=", toIdx, "isBidEndSort=", isBidEndSort);
     let { data: lots, error, count } = leiloes
-      ? await query.limit(500) // leiloes: fetch more, filter, then slice
+      ? await query.limit(5000) // leiloes: fetch more, filter, then slice
       : isBidEndSort
-      ? await query.limit(500) // bid_end sort: fetch all for in-memory sort
+      ? await query.limit(5000) // bid_end sort: fetch all for in-memory sort
       : await query.range(fromIdx, toIdx); // other sorts: use range pagination
     console.error("DEBUG: after query, lots count =", (lots || []).length, "count =", count, "leiloes=", leiloes, "isBidEndSort=", isBidEndSort);
 
@@ -160,16 +160,16 @@ export async function GET(request: NextRequest) {
       const { data: allAuctions } = await svc
         .from("auctions")
         .select("id, auction_code, status, result_date");
-      // Exclude: status=COMPLETED OR result_date is in the past
-      // UNKNOWN with null result_date = track for city-based exclusion only
+      // Exclude: ONLY COMPLETED auctions. UNKNOWN auctions are kept visible
+      // (even if result_date has just passed — CAIXA may still display them on Vitrine).
+      // Old logic also excluded `result_date < today` which removed just-ended active
+      // auctions (e.g., 187/2026 just after its bid window). Too aggressive.
       const excludeAuctionIds: number[] = [];
       const excludeAuctionCodes: Set<string> = new Set();
       const unknownAuctionIds: number[] = []; // UNKNOWN with null result_date
       if (allAuctions) {
         for (const a of allAuctions as any[]) {
-          const isEnded = a.status === "COMPLETED" ||
-            (a.result_date && a.result_date < today);
-          if (isEnded) {
+          if (a.status === "COMPLETED") {
             excludeAuctionIds.push(a.id);
             if (a.auction_code) excludeAuctionCodes.add(a.auction_code);
           }
@@ -203,20 +203,15 @@ export async function GET(request: NextRequest) {
     if (excludeAuctionIds.length > 0 || excludeAuctionCodes.size > 0 || endedCityIds.length > 0) {
       console.error("DEBUG filter: running filter, lots count before=", (lots || []).length);
       lots = (lots || []).filter((l: any) => {
-        // Exclude if auction is definitively COMPLETED (has past result_date)
+        // Exclude if auction is COMPLETED
         if (l.auction_id && excludeAuctionIds.includes(l.auction_id)) {
-          console.error("DEBUG filter: excluding lot", l.id, "due to auction_id", l.auction_id);
           return false;
         }
-        // Exclude if co_leilao matches an ended auction_code
         if (l.co_leilao && excludeAuctionCodes.has(l.co_leilao)) {
-          console.error("DEBUG filter: excluding lot", l.id, "due to co_leilao", l.co_leilao);
           return false;
         }
-        // Exclude if city has no future bid periods AND auction is UNKNOWN with null result_date or absent
-        // This handles orphan lots where city's bidding window ended and auction wasn't closed
-        if (l.city_id && endedCityIds.includes(l.city_id) && (!l.auction_id || (l.auction_id && unknownAuctionIds.includes(l.auction_id)))) {
-          console.error("DEBUG filter: excluding lot", l.id, "due to city", l.city_id, "with no future periods and auction is unknown/absent");
+        // Exclude orphan lots (no auction link + city has no future bid periods)
+        if (l.city_id && endedCityIds.includes(l.city_id) && !l.auction_id) {
           return false;
         }
         return true;

@@ -1,8 +1,7 @@
 /**
- * Proxy rotation module
- * Supports:
- *  - Manual proxy list (PROXY_URLS env var, comma-separated)
- *  - WebShare rotating proxy with IP auth via curl fallback
+ * Proxy rotation module for CAIXA scraping.
+ * Uses PROXY_URLS env var (comma-separated) — no DB dependency.
+ * Evomi residential format: https://user:pass@gateway:port
  *
  * NOTE: ProxyAgent is imported lazily inside buildProxyAgent() to prevent
  * proxy-agent v8 from patching globalThis.fetch, which would break
@@ -12,29 +11,16 @@
 import { URL } from 'url';
 import { execFileSync } from 'child_process';
 
-// Proxy pool — initialized lazily on first call to getProxyUrl()
+// Proxy pool — initialized from PROXY_URLS env var
 let proxyIndex = 0;
 let proxyPool = [];
 let initialized = false;
-let dbInitialized = false;
 
-// Exported for external control (e.g. scraper loading from DB)
 export function setProxyPool(entries) {
-  // Support both array of strings (backwards compat) and array of {id, url} objects
-  proxyPool = entries.map(e => typeof e === 'string' ? e : { id: e.id, url: e.url });
+  proxyPool = entries.map(e => typeof e === 'string' ? e : e.url);
   proxyIndex = 0;
   initialized = true;
-  dbInitialized = true;
-  if (proxyPool.length === 0) {
-    console.warn('[proxy] Proxy pool empty — direct connection');
-  } else {
-    console.log(`[proxy] Pool set with ${proxyPool.length} proxy(ies)`);
-    for (const p of proxyPool) {
-      const entry = typeof p === 'string' ? p : p.url;
-      const u = parseProxyUrl(entry);
-      console.log(`[proxy]   - ${u ? u.hostname : entry}`);
-    }
-  }
+  console.log(`[proxy] Pool set with ${proxyPool.length} proxy(ies): ${proxyPool.map(p => new URL(p).hostname).join(', ')}`);
 }
 
 export function getProxyPool() {
@@ -49,140 +35,35 @@ function parseProxyUrl(raw) {
   }
 }
 
-async function initDbProxyPool() {
-  try {
-    const { createClient } = await import('@supabase/supabase-js');
-    const supabase = createClient(
-      process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL,
-      process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY
-    );
-    const { data } = await supabase
-      .from('working_proxies')
-      .select('id, proxy_address, port, username, password')
-      .eq('status', 'active')
-      .eq('caixa_works', true)
-      .order('last_used_at', { ascending: true, nullsFirst: true });
-
-    if (!data || data.length === 0) {
-      console.warn('[proxy] No active working proxies in DB — direct connection');
-      return;
-    }
-
-    proxyPool = data.map(p => ({
-      id: p.id,
-      url: p.username && p.password
-        ? `http://${p.username}:${p.password}@${p.proxy_address}:${p.port}`
-        : `http://${p.proxy_address}:${p.port}`,
-    }));
-
-    console.log(`[proxy] DB pool loaded with ${proxyPool.length} working proxy(ies)`);
-    for (const p of proxyPool) {
-      console.log(`[proxy]   - id=${p.id} ${p.url}`);
-    }
-  } catch (e) {
-    console.warn(`[proxy] Failed to load DB pool: ${e.message} — direct connection`);
-  }
-}
-
-// Mark a proxy as failed in DB (called on 403/error at runtime)
-async function markProxyFailed(proxyId) {
-  if (!proxyId) return;
-  try {
-    const { createClient } = await import('@supabase/supabase-js');
-    const supabase = createClient(
-      process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL,
-      process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY
-    );
-    // Get current failure_count
-    const { data } = await supabase
-      .from('working_proxies')
-      .select('failure_count')
-      .eq('id', proxyId)
-      .single();
-
-    const newCount = (data?.failure_count ?? 0) + 1;
-    const isNowBlocked = newCount >= 3;
-
-    await supabase
-      .from('working_proxies')
-      .update({
-        failure_count: newCount,
-        status: isNowBlocked ? 'blocked' : 'active',
-        caixa_works: false,
-        last_failure_at: new Date().toISOString(),
-      })
-      .eq('id', proxyId);
-
-    console.warn(`[proxy] Marked proxy id=${proxyId} failed (count=${newCount}, blocked=${isNowBlocked})`);
-  } catch (e) {
-    console.warn(`[proxy] Failed to mark proxy ${proxyId} as failed: ${e.message}`);
-  }
-}
-
 function initProxyPool() {
   if (initialized) return;
-  proxyPool = [];
-
-  // If SUPABASE_URL is available, prefer DB pool over PROXY_URLS
-  // (DB pool is tested against CAIXA, PROXY_URLS is unvalidated)
-  const hasDbCredentials = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-  if (hasDbCredentials && !process.env.PROXY_URLS_FORCE) {
-    if (!process.env.PROXY_URLS || process.env.PROXY_URLS === 'http://p.webshare.io:9999/') {
-      // No PROXY_URLS or rotating proxy — will load from DB in ensureProxyPool()
-      console.warn('[proxy] Will use DB proxy pool (SUPABASE_URL available, PROXY_URLS skipped)');
-      initialized = true;
-      return;
-    }
-  }
 
   if (process.env.PROXY_URLS) {
     const urls = process.env.PROXY_URLS.split(',')
       .map(u => u.trim())
       .filter(Boolean);
 
-    for (const url of urls) {
-      // Skip WebShare token format
-      if (url.includes('_') && !url.startsWith('http://') && !url.startsWith('https://')) {
-        continue;
-      }
-      proxyPool.push(url);
-    }
-
-    if (proxyPool.length === 0) {
-      console.warn('No proxies configured — direct connection');
-    } else {
-      console.log(`Proxy pool initialized with ${proxyPool.length} proxy(ies)`);
-      for (const p of proxyPool) {
-        const u = parseProxyUrl(p);
-        console.log(`  - ${u ? u.hostname : p}`);
-      }
+    proxyPool = urls;
+    console.log(`[proxy] Pool initialized with ${proxyPool.length} proxy(ies)`);
+    for (const p of proxyPool) {
+      const u = parseProxyUrl(p);
+      console.log(`[proxy]   - ${u ? u.hostname : p}`);
     }
   } else {
-    console.warn('[proxy] PROXY_URLS not set — scraper should call setProxyPool() before use');
+    console.warn('[proxy] PROXY_URLS not set — using direct connection');
   }
+
+  initialized = true;
 }
-
-async function buildProxyAgent(proxyUrl) {
-  if (!proxyUrl) return null;
-  const { ProxyAgent } = await import('proxy-agent');
-  return new ProxyAgent(proxyUrl);
-}
-
-// ============================================================
-// FETCH WITH PROXY (used by scraper for CAIXA API calls)
-// Uses curl as fallback when proxy-agent returns 403
-// ============================================================
-
-const MAX_PROXY_RETRIES = 3;
 
 async function curlFetch(url, proxyUrl, options = {}) {
   const u = parseProxyUrl(proxyUrl);
   const proxyHost = u?.hostname ?? proxyUrl;
   const proxyPort = u?.port ?? '80';
+  const proxyScheme = u?.protocol === 'https:' ? 'https' : 'http';
 
-  const args = ['-s', '--max-time', '30', '--proxy', `http://${proxyHost}:${proxyPort}/`];
+  const args = ['-s', '--max-time', '90', '--proxy', `${proxyScheme}://${proxyHost}:${proxyPort}/`];
 
-  // If credentials embedded in URL (http://user:pass@host:port/), pass to curl
   if (u?.username && u?.password) {
     args.push('--proxy-user', `${u.username}:${u.password}`);
   }
@@ -195,13 +76,10 @@ async function curlFetch(url, proxyUrl, options = {}) {
     args.push('-H', `${key}: ${value}`);
   }
 
-  // -k: skip SSL verification (CAIXA uses self-signed cert)
-  // --ipv4: avoid IPv6 issues
   args.push('-k', '--ipv4', url);
 
   try {
     const result = execFileSync('curl', args, { encoding: 'utf-8' });
-    // Check if response is HTML (CAIXA blocking page or proxy error)
     const trimmed = result.trim();
     const isHtml = trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html') || trimmed.startsWith('<HTML');
     if (isHtml) {
@@ -212,7 +90,6 @@ async function curlFetch(url, proxyUrl, options = {}) {
         json: () => Promise.reject(new Error('HTML response (blocked)')),
       };
     }
-    // Verify it's actually JSON before claiming success
     try {
       JSON.parse(trimmed);
     } catch {
@@ -230,7 +107,6 @@ async function curlFetch(url, proxyUrl, options = {}) {
       json: () => Promise.resolve(JSON.parse(trimmed)),
     };
   } catch (e) {
-    // Non-zero exit code from curl = failure
     return {
       ok: false,
       status: 403,
@@ -240,61 +116,30 @@ async function curlFetch(url, proxyUrl, options = {}) {
   }
 }
 
-// Lazy DB load — only used if no PROXY_URLS env var and scraper didn't call setProxyPool()
-async function ensureProxyPool() {
-  if (dbInitialized) return;
-  if (!initialized) {
-    initProxyPool(); // may early-return if DB path is preferred
-  }
-  if (proxyPool.length > 0) {
-    initialized = true;
-    return; // got proxies from PROXY_URLS
-  }
-  // proxyPool empty — load from DB
-  await initDbProxyPool();
-  initialized = true;
-  dbInitialized = true;
-}
-
 export async function proxiedFetch(url, options = {}) {
-  await ensureProxyPool();
+  initProxyPool();
 
   if (proxyPool.length === 0) {
+    console.log(`[proxy] direct → ${url}`);
     return fetch(url, options);
   }
 
-  let lastError;
-  let triedCount = 0;
+  const entry = proxyPool[proxyIndex % proxyPool.length];
+  const u = parseProxyUrl(entry);
+  console.log(`[proxy] ${u?.hostname ?? entry} → ${url}`);
 
-  // Try each proxy in sequence until one works
-  while (triedCount < proxyPool.length) {
-    const idx = proxyIndex % proxyPool.length;
-    const entry = proxyPool[idx];
-    // Support both old format (string) and new format ({id, url})
-    const proxyUrl = typeof entry === 'string' ? entry : entry.url;
-    const proxyId = typeof entry === 'object' ? entry.id : null;
-    const u = parseProxyUrl(proxyUrl);
-    console.log(`  [proxy] ${u?.hostname ?? proxyUrl} → ${url}`);
+  const curlRes = await curlFetch(url, entry, options);
+  if (curlRes.ok) return curlRes;
 
-    try {
-      // Always use curl for proxy requests — proxy-agent is unreliable with these proxies
-      const curlRes = await curlFetch(url, proxyUrl, options);
-      if (curlRes.ok) return curlRes;
-
-      // If curl failed, try next proxy
-      console.warn(`  [proxy] ${u?.hostname ?? proxyUrl} curl failed (${curlRes.status}), trying next...`);
-      if (proxyId) await markProxyFailed(proxyId);
-      proxyIndex++; // mark this one as bad, move to next
-      triedCount++;
-      continue;
-    } catch (e) {
-      lastError = e;
-      console.warn(`  [proxy] ${u?.hostname ?? proxyUrl} failed: ${e.message}, trying next...`);
-      if (proxyId) await markProxyFailed(proxyId);
-      proxyIndex++; // mark this one as bad, move to next
-      triedCount++;
-    }
+  // Try next proxy in pool
+  proxyIndex++;
+  if (proxyIndex < proxyPool.length) {
+    const nextEntry = proxyPool[proxyIndex % proxyPool.length];
+    const nextU = parseProxyUrl(nextEntry);
+    console.warn(`[proxy] ${u?.hostname ?? entry} failed (${curlRes.status}), trying ${nextU?.hostname ?? nextEntry}...`);
+    const retryRes = await curlFetch(url, nextEntry, options);
+    if (retryRes.ok) return retryRes;
   }
 
-  throw lastError ?? new Error('All proxies failed');
+  throw new Error(`All proxies failed for ${url}`);
 }

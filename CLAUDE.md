@@ -113,6 +113,8 @@ WHERE outcome_status IS NULL
 // Exclude orphan lots: city has no future bid periods AND auction is UNKNOWN/absent
 ```
 
+**Implementation note**: Stage 1 fetches up to 500 rows (not the requested page size) so filtering has enough data. After Stage 2 filter, results are sliced to the requested page range. This means pagination on `/leiloes` requires in-memory slicing after the 500-row cap — a known limitation (see pagination bug below).
+
 **Current result**: ~27 lots pass the filter (from cities Criciuma, Caxias do Sul, Passo Fundo, Goiânia that have future bid periods and UNKNOWN-null-result auctions).
 
 ### Why So Few Lots?
@@ -133,6 +135,16 @@ Shows lots from COMPLETED auctions with `outcome_status` set, plus lots from com
 3. **Pagination bug**: `/api/lots` with `page=2` for `leiloes=true` returns the same 27 items as page 1 (slicing bug in API, affects all sorts).
 
 4. **Auction status staleness**: `auctions.status=UNKNOWN` for many active auctions — CAIXA doesn't provide explicit active/completed status, so we infer from `result_date`. Lots from UNKNOWN auctions with future city bid periods are kept; lots from UNKNOWN auctions whose city bid periods ended are excluded.
+
+## AI / Copilot Stack
+
+The Joias Copilot chat interface (`/copilot`) uses:
+- `@ai-sdk/react` + `ai` package for LLM integration
+- Custom agent framework in `src/components/ai-elements/` (50 components): `agent.tsx`, `message.tsx`, `prompt-input.tsx`, `tool.tsx`, `conversation.tsx`, `reasoning.tsx`, `chain-of-thought.tsx`, etc.
+- `src/components/layout/RadarCopilot.tsx` — the copilot UI shell
+- LLM calls route through `llm-gateway.js` (DeepSeek/minimax compatible)
+
+The `/api/chat` route handles copilot message processing.
 
 ## Design System
 
@@ -159,11 +171,16 @@ Colors from `globals.css`:
 | File | Purpose |
 |------|---------|
 | `scraper.js` | Main scraper (Node.js ESM, all modes) |
-| `http-proxy-utils.js` | Proxy rotation for CAIXA requests |
+| `http-proxy-utils.js` | Low-level proxy rotation (curl-based, bypasses proxy-agent) |
+| `src/lib/proxy/pool.ts` | Runtime proxy pool with failure tracking |
+| `src/lib/proxy/webshare.ts` | Webshare.io proxy credential management |
 | `llm-gateway.js` | LLM provider abstraction (DeepSeek/minimax compatible) |
 | `src/app/api/lots/route.ts` | Lots listing API with leiloes/vendas filter logic |
-| `src/lib/supabase.ts` | Supabase client |
+| `src/lib/supabase.ts` | Supabase client (browser) |
+| `src/lib/supabase-server.ts` | Supabase admin client (server-side) |
 | `src/hooks/useUser.tsx` | Auth context + user profile |
+
+**Schema migrations**: `supabase_joias/migrations/`
 
 ## Development
 
@@ -171,8 +188,11 @@ Colors from `globals.css`:
 npm install
 npm run dev      # http://localhost:3000
 npm run build    # Production build
+npm run lint     # ESLint
 node scraper.js --mode=active-lots  # Run scraper directly
 ```
+
+No test runner is configured.
 
 ## Environment Variables
 

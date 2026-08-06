@@ -52,3 +52,11 @@ llm-gateway.js
 scripts/
 docs/
 supabase_joias/
+lot_backup.json
+scrape-with-pool mode (DB proxy pool)
+
+# Large / temporary files
+lot_backup.json
+*.bak
+scrape-test-*
+.DS_Store
