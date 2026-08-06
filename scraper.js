@@ -2501,52 +2501,36 @@ async function modeEnrich() {
 
 const ENRICHMENT_PROMPT = `You extract structured data from Brazilian jewelry auction lots. Return ONLY valid JSON, no markdown, no explanation.
 
-Fields:
-- title: detailed title in Portuguese that includes piece counts (e.g. "Um anel e três brincos de ouro 18k - 28.25g", "Aliança, dois anéis e um colar de ouro - 15.5g"). Title Case, ALWAYS include weight_g at the end.
-- description: rich 2-3 sentence natural description in Portuguese describing this specific lot. After the description, add factor sections ONLY for factors actually detected in the lot (alphabetical order within each section):
-  LINEBREAK + "Fatores que podem afetar o valor:" (show this section header if ANY of these are detected: amassaduras, partiduras, baixo quilate, enchimento, folheado, incompleto, pedras não valorizadas)
-  LINEBREAK + "• Amassado: peças com deformações visíveis." (if amassaduras/amolgaduras/dentes/iniciais detected)
-  LINEBREAK + "• Baixo quilate: ouro de pureza inferior ao esperado." (if baixo quilate detected)
-  LINEBREAK + "• Enchimento: interior preenchido com material menos valioso." (if ENCHIMENTO/hallow detected)
-  LINEBREAK + "• Folheado: camada fina de ouro sobre metal base — valor significativamente menor." (if FOLHEADO/FUNDO FOLHEADO detected)
-  LINEBREAK + "• Incompleto: peças com componentes faltando." (if incompleto/faltam componentes detected)
-  LINEBREAK + "• Partido/Quebrado: peças partidas ou quebradas." (if partido/quebrado/partidas detected)
-  LINEBREAK + "• Pedras não valorizadas: gemas declaradas sem valor de mercado formal." (if pedras without preço/precificado detected)
-  LINEBREAK + "Fatores que podem agregar valor:" (show this section header if ANY of these are detected: diamantes, pedras preciosas, moedas, barras, ouro rodinado, prata/platina/paládio)
-  LINEBREAK + "• Com diamantes / pedras preciosas: pedrarias que podem superar o valor do ouro." (if diamantes/CONTÉM PEDRAS detected)
-  LINEBREAK + "• Moeda / barra: ouro trocável como commodity." (if moeda/barra detected)
-  LINEBREAK + "• Ouro rodinado: ouro maciço com banho de ródio." (if OURO RODINADO detected)
-  LINEBREAK + "• Prata / platina / paládio: metais preciosos com valor próprio." (if prata/platina/paládio detected)
-  LINEBREAK + "Descricao original CAIXA:" LINEBREAK + [original de_contrato text]
-  LINEBREAK + "As informacoes foram extraídas automaticamente e são fornecidas sem garantia. O valor estimado é baseado exclusivamente no peso e pureza do ouro, desconsiderando pedrarias e manufacture."
-  LINEBREAK + "A decisao de lance é de exclusiva responsabilidade do licitante."
-- karat: gold purity if identifiable (18k, 14k, 10k, 24k) or null
-- category: one word (Aliança, Colar, Brinco, Anel, Pulseira, Relógio, Moeda, Barra, Corrente, Jóia)
-- weight_g: estimated weight in grams as number, or null
-- tags: lowercase descriptive tags that capture factors PRESENT in this SPECIFIC LOT DESCRIPTION only — do NOT invent tags that aren't in the lot description:
-  ALWAYS add "peso-misto" tag when the lot contains MORE THAN ONE precious metal type (e.g. "OURO E PRATA", "OURO E PALÁDIO", "OURO E PLATINA", "OURO BRANCO E PRATA") — this flag indicates the total weight includes multiple metals and the gold-value calculation is CAPPED, not the total value.
-  RISK: ouro, ouro-18k, ouro-14k, ouro-10k, alianca, brinco, anel, pulseira, colar, corrente, pendente, broche, moeda, barra, relogio, amassado, quebrado, partido, incompleto, com-defeito, faltam-componentes, folheado, ouro-rodinado, prata-rodinado, com-pedras, sem-pedras, com-diamantes, prata, ouro-branco, platina, prateado, enchimento, peso-misto
-  VALUE INDICATORS: com-pedras, com-diamantes, com-rubi, com-esmeralda, com-safira, com-pedras-preciosas, prata, platina, moeda, barra — these increase estimated value and MUST be included when present
+CRITICAL: The "description" field MUST ALWAYS contain ALL of the following sections in this exact order, separated by \\n (newline):
+1. A 2-3 sentence natural Portuguese description of the lot
+2. (empty line)
+3. "Fatores que podem afetar o valor:" — followed by 0+ bullet points (use "• " prefix) for each detected defect. If no defects, leave this section empty (just the header).
+4. (empty line)
+5. "Fatores que podem agregar valor:" — followed by 0+ bullet points (use "• " prefix) for each value indicator. If none, leave empty.
+6. (empty line)
+7. "Descricao original CAIXA:" followed by the EXACT de_contrato text on the next line
+8. (empty line)
+9. "As informacoes foram extraídas automaticamente..."
+10. "A decisao de lance é de exclusiva responsabilidade do licitante."
 
-IMPORTANT rules:
-• Always include piece counts in title: "um anel", "três brincos", "duas alianças" — never just "anel e brincos"
-• When description says "CONTÉM: pedras" or mentions gems/stones → add both "com-pedras" AND the specific gem tag
-• When description says "CONTÉM: diamantes" → add "com-diamantes" tag
-• Metal plating rules: "OURO RODINADO" = "ouro-rodinado" (NOT folheado, solid gold), "FOLHEADO" = "folheado" (base metal)
-• "OURO BRANCO" = "ouro-branco" (solid white gold, NOT folheado)
-• Never use "folheado" on "OURO RODINADO" items — they are real gold
-• Include tags ONLY when that material/condition is explicitly present in the lot description — never add tags just because they are in the value indicators list
+Defect types to detect: amassaduras/amolgaduras (Amassado), partiduras/quebrado (Partido), baixo quilate (Baixo quilate), enchimento (Enchimento), folheado (Folheado), incompleto/faltam-componentes (Incompleto), pedras não valorizadas (Pedras não valorizadas).
+Value indicators: diamantes (Com diamantes), pedras preciosas (Com pedras preciosas), moedas/barras (Moeda / barra), ouro rodinado (Ouro rodinado), prata/platina/paládio (Prata / platina / paládio).
 
-Rules: title MUST be Title Case (never ALL CAPS), ALWAYS append weight when available as " - Xg", be conservative, do not invent info.
+EXAMPLE of correct description (8-line response):
+"Este lote contém uma aliança, um anel e um colar em ouro branco 18k com diamantes, totalizando 5,20g. As peças encontram-se em bom estado de conservação.\\n\\nFatores que podem afetar o valor:\\n• Amassado: peças com deformações visíveis.\\n\\nFatores que podem agregar valor:\\n• Com diamantes / pedras preciosas: pedrarias que podem superar o valor do ouro.\\n• Ouro rodinado: ouro maciço com banho de ródio.\\n\\nDescricao original CAIXA:\\nUMA ALIANÇA, UM ANEL, UM COLAR, DE: OURO BRANCO 18K, OURO RODINADO; CONTÉM: diamantes; PESO LOTE: 5,20G\\n\\nAs informacoes foram extraídas automaticamente e são fornecidas sem garantia. O valor estimado é baseado exclusivamente no peso e pureza do ouro, desconsiderando pedrarias e manufacture.\\n\\nA decisao de lance é de exclusiva responsabilidade do licitante."
 
-Return ONLY this JSON structure, no other text:
-{"title":"...","description":"...","karat":"...","category":"...","weight_g":...,"tags":[...],"confidence":0.0..1.0,"confidence_reasons":["..."]}
+Other fields:
+- title: detailed title in Portuguese with piece counts, Title Case, ALWAYS include weight_g at the end (e.g. "Um anel e três brincos de ouro 18k - 28.25g")
+- karat: must be one of: "24k","18k","14k","12k","10k","9k","silver","palladium","platinum","base_metal",null
+- category: must be one of: "Aliança","Colar","Brinco","Anel","Pulseira","Relógio","Moeda","Barra","Corrente","Pendente","Broche","Jóia","Tornozeleira"
+- weight_g: positive number or null
+- tags: lowercase tags describing the lot. MUST include: "peso-misto" if more than one precious metal present
+- confidence: 0.0-1.0 (low if uncertain about any field)
+- confidence_reasons: brief array listing what clues you used
 
-karat MUST be one of: "24k","18k","14k","12k","10k","9k","silver","palladium","platinum","base_metal",null
-category MUST be one of: "Aliança","Colar","Brinco","Anel","Pulseira","Relógio","Moeda","Barra","Corrente","Pendente","Broche","Jóia","Tornozeleira"
-weight_g MUST be a positive number or null
-confidence: 0.0-1.0 reflecting how certain you are of the fields above
-confidence_reasons: brief array listing what you used (e.g. ["explicit OURO 18K","PESO LOTE 5.2G","CONTÉM diamantes"])`;
+CRITICAL: The JSON string values for "description" MUST use literal \\n (backslash-n) for newlines, not actual newlines. The downstream code splits on \\n.
+
+Return ONLY valid JSON: {"title":"...","description":"...","karat":"...","category":"...","weight_g":...,"tags":[...],"confidence":0.0..1.0,"confidence_reasons":["..."]}`;
 
 async function enrichLot(lot) {
   const deContrato = lot.de_contrato || '';
@@ -2594,6 +2578,16 @@ async function enrichLot(lot) {
       // Clamp confidence to [0, 1]
       if (typeof parsed.confidence !== 'number' || parsed.confidence < 0 || parsed.confidence > 1) {
         parsed.confidence = 0.5; // unknown
+      }
+
+      // Quality validation: reject empty/invalid responses so they get retried later
+      const titleOk = (parsed.title || '').trim().length > 0;
+      const descOk = (parsed.description || '').trim().length > 20;  // at least some content
+      const structureOk = (parsed.description || '').includes('Descricao original CAIXA');
+      if (!titleOk || !descOk || !structureOk) {
+        throw new Error(
+          `Empty/incomplete enrichment (title=${titleOk}, desc=${descOk}, structure=${structureOk})`
+        );
       }
 
       return parsed;
