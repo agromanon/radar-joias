@@ -160,16 +160,18 @@ export async function GET(request: NextRequest) {
       const { data: allAuctions } = await svc
         .from("auctions")
         .select("id, auction_code, status, result_date");
-      // Exclude: ONLY COMPLETED auctions. UNKNOWN auctions are kept visible
-      // (even if result_date has just passed — CAIXA may still display them on Vitrine).
-      // Old logic also excluded `result_date < today` which removed just-ended active
-      // auctions (e.g., 187/2026 just after its bid window). Too aggressive.
+      // Exclude auctions that have ended: COMPLETED status OR bid_end_date in the past.
+      // User wants the "Leilões Disponíveis" view to show only lots from auctions
+      // where bidding is still possible. We trust them to filter the trash themselves.
       const excludeAuctionIds: number[] = [];
       const excludeAuctionCodes: Set<string> = new Set();
       const unknownAuctionIds: number[] = []; // UNKNOWN with null result_date
       if (allAuctions) {
         for (const a of allAuctions as any[]) {
-          if (a.status === "COMPLETED") {
+          const isEnded =
+            a.status === "COMPLETED" ||
+            (a.bid_end_date && a.bid_end_date < today);
+          if (isEnded) {
             excludeAuctionIds.push(a.id);
             if (a.auction_code) excludeAuctionCodes.add(a.auction_code);
           }
