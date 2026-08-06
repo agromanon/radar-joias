@@ -130,19 +130,37 @@ export async function GET(request: NextRequest) {
     const fromIdx = (page - 1) * limit;
     const toIdx = fromIdx + limit - 1;
 
-    // For leiloes: push ALL active-auction filtering to the database query
-    // (PostgREST foreign-key filter syntax). This is the cleanest, fastest path
-    // and works with proper range pagination + count: 'exact'.
+    // For leiloes: filter at SQL level using a 2-step approach.
+    // PostgREST FK filter syntax (e.g. `auctions.bid_end_date=gt.X`) is unreliable
+    // across different Supabase versions, so we explicitly fetch active auction IDs
+    // and use `in()` which is guaranteed to work.
     if (leiloes) {
       const today = new Date().toISOString().split("T")[0];
+      const { data: activeAuctions, error: actErr } = await svc
+        .from("auctions")
+        .select("id")
+        .gt("bid_end_date", today)
+        .neq("status", "COMPLETED");
+      if (actErr) {
+        console.error("Active auctions query failed:", actErr);
+        return NextResponse.json(
+          { error: "Failed to fetch active auctions", details: actErr.message },
+          { status: 500 }
+        );
+      }
+      const activeIds = (activeAuctions ?? []).map((a: any) => a.id);
+      if (activeIds.length === 0) {
+        return NextResponse.json({
+          lots: [],
+          pagination: { page, limit, total: 0, totalPages: 0, hasMore: false },
+          filters: { auctioneers: [] },
+        });
+      }
       query = query
         .is("outcome_status", null)
         .not("valor", "is", null)
         .eq("enrichment_status", "enriched")
-        .not("auction_id", "is", null)             // require auction link
-        .gt("auctions.bid_end_date", today)        // bid_end > today
-        .neq("auctions.status", "COMPLETED");      // not completed
-      // Apply sort at DB level too (no in-memory sort/slice needed)
+        .in("auction_id", activeIds);
       const ascending = order === "asc";
       query = query.order(sort === "price" ? "valor" : "id", { ascending });
     } else if (!isBidEndSort) {
