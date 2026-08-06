@@ -2418,6 +2418,23 @@ function getCity4FromLotNumber(lotNumber) {
 async function modeEnrich() {
   console.log('\n=== Mode: enrich ===');
   console.log('  Enriching lot descriptions via LLM...');
+
+  // Fetch active auction IDs (bid_end_date > today, status != COMPLETED)
+  // This focuses enrichment on lots that will actually show on /leiloes.
+  const today = new Date().toISOString().split('T')[0];
+  const { data: activeAuctions } = await supabase
+    .from('auctions')
+    .select('id')
+    .gt('bid_end_date', today)
+    .neq('status', 'COMPLETED');
+  const activeIds = (activeAuctions ?? []).map(a => a.id);
+  console.log(`  Active auctions: ${activeIds.length}`);
+
+  if (activeIds.length === 0) {
+    console.log('  No active auctions — nothing to enrich.');
+    return;
+  }
+
   const BATCH = 50;
   const CONCURRENCY = 10;
   let processed = 0, updated = 0, failed = 0;
@@ -2427,6 +2444,10 @@ async function modeEnrich() {
       .from('lots')
       .select('id, de_contrato, lot_number, contract_number, karat, peso_lote')
       .or('enrichment_status.is.null,enrichment_status.eq.pending,enrichment_status.eq.failed')
+      .not('de_contrato', 'is', null)
+      .not('valor', 'is', null)
+      .is('outcome_status', null)
+      .in('auction_id', activeIds)
       .limit(BATCH);
 
     if (!lots?.length) {
@@ -2453,6 +2474,8 @@ async function modeEnrich() {
             category_enriched: result.category,
             weight_enriched: result.weight_g,
             tags: result.tags,
+            enrichment_confidence: result.confidence,
+            enrichment_needs_review: (result.confidence ?? 1) < 0.7,
           })
           .eq('id', lot.id);
         if (error) {
@@ -2517,7 +2540,13 @@ IMPORTANT rules:
 Rules: title MUST be Title Case (never ALL CAPS), ALWAYS append weight when available as " - Xg", be conservative, do not invent info.
 
 Return ONLY this JSON structure, no other text:
-{"title":"...","description":"...","karat":"...","category":"...","weight_g":...,"tags":[...]}`;
+{"title":"...","description":"...","karat":"...","category":"...","weight_g":...,"tags":[...],"confidence":0.0..1.0,"confidence_reasons":["..."]}
+
+karat MUST be one of: "24k","18k","14k","12k","10k","9k","silver","palladium","platinum","base_metal",null
+category MUST be one of: "Aliança","Colar","Brinco","Anel","Pulseira","Relógio","Moeda","Barra","Corrente","Pendente","Broche","Jóia","Tornozeleira"
+weight_g MUST be a positive number or null
+confidence: 0.0-1.0 reflecting how certain you are of the fields above
+confidence_reasons: brief array listing what you used (e.g. ["explicit OURO 18K","PESO LOTE 5.2G","CONTÉM diamantes"])`;
 
 async function enrichLot(lot) {
   const deContrato = lot.de_contrato || '';
@@ -2533,6 +2562,10 @@ async function enrichLot(lot) {
     return null;
   }
 
+  // Allowed enums for validation
+  const ALLOWED_KARATS = new Set(['24k', '18k', '14k', '12k', '10k', '9k', 'silver', 'palladium', 'platinum', 'base_metal', null]);
+  const ALLOWED_CATEGORIES = new Set(['Aliança', 'Colar', 'Brinco', 'Anel', 'Pulseira', 'Relógio', 'Moeda', 'Barra', 'Corrente', 'Pendente', 'Broche', 'Jóia', 'Tornozeleira', null]);
+
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const result = await llmCall('enrich', ENRICHMENT_PROMPT, prompt, 'openrouter/free');
@@ -2546,7 +2579,24 @@ async function enrichLot(lot) {
         }
         throw new Error('No JSON found in LLM response');
       }
-      return JSON.parse(jsonMatch[0]);
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      // Validate karat / category enums — coerce invalid values to null
+      if (!ALLOWED_KARATS.has(parsed.karat)) {
+        console.warn(`  [${lot.id}] invalid karat "${parsed.karat}" — coerced to null`);
+        parsed.karat = null;
+      }
+      if (!ALLOWED_CATEGORIES.has(parsed.category)) {
+        console.warn(`  [${lot.id}] invalid category "${parsed.category}" — coerced to null`);
+        parsed.category = null;
+      }
+
+      // Clamp confidence to [0, 1]
+      if (typeof parsed.confidence !== 'number' || parsed.confidence < 0 || parsed.confidence > 1) {
+        parsed.confidence = 0.5; // unknown
+      }
+
+      return parsed;
     } catch (err) {
       const isRateLimit = err.message?.includes('429') || err.message?.includes('rate limit') || err.message?.includes('Too Many Requests');
       const isNetworkErr = err.message?.includes('EHOSTUNREACH') || err.message?.includes('ETIMEDOUT') || err.message?.includes('ENOTFOUND') || err.message?.includes('ECONNREFUSED');
