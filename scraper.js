@@ -1859,6 +1859,7 @@ async function main() {
     case 'health-check-proxies': await modeHealthCheckProxies(); break;
     case 'scrape-with-pool':     await modeScrapeWithPool(); break;
     case 'vitrine-active':       await modeVitrineActive(); break;
+    case 'fetch-descriptions':   await modeFetchDescriptions(); break;
     default:
       console.error(`Unknown mode: ${mode}`);
       process.exit(1);
@@ -2785,6 +2786,86 @@ async function modeVitrineActive() {
   }
 
   console.log(`\nDone: ${totalInserted} lots upserted`);
+}
+
+// ============================================================
+// MODE: FETCH-DESCRIPTIONS
+// For each lot missing `de_contrato`, hit /cronograma/contrato?codigoLeilao=X&numeroContrato=Y
+// to retrieve the descricao (description text) and persist it to DB.
+// This unblocks enrichment for all Vitrine-active auctions whose /cronograma/contratos
+// response doesn't include descriptions.
+// ============================================================
+
+async function modeFetchDescriptions() {
+  process.stderr.write('\n=== Mode: fetch-descriptions ===\n');
+  process.stderr.write('  Fetching descricao field for lots without de_contrato\n');
+
+  // Use id-based keyset pagination (much faster than OFFSET on filtered queries)
+  const BATCH = 100;
+  const PARALLEL = 10;
+  let totalUpdated = 0, totalSkipped = 0;
+  let lastId = 0;
+  let batchNum = 0;
+
+  while (true) {
+    batchNum++;
+    const t0 = Date.now();
+    const { data: lots, error } = await supabase
+      .from('lots')
+      .select('id, co_leilao, contract_number, lot_number')
+      .is('de_contrato', null)
+      .not('contract_number', 'is', null)
+      .gt('id', lastId)
+      .order('id')
+      .limit(BATCH);
+
+    if (error) {
+      process.stderr.write(`  Query error: ${error.message}\n`);
+      break;
+    }
+    if (!lots?.length) break;
+
+    let batchUpdated = 0;
+    let fetchedOk = 0, noDesc = 0, errorCount = 0;
+    for (let i = 0; i < lots.length; i += PARALLEL) {
+      const slice = lots.slice(i, i + PARALLEL);
+      const results = await Promise.all(slice.map(async (lot) => {
+        const url = `${PORTAL_API_BASE}/cronograma/contrato?codigoLeilao=${encodeURIComponent(lot.co_leilao)}&numeroContrato=${encodeURIComponent(lot.contract_number)}`;
+        try {
+          const res = await fetchJson(url, { headers: { ...STANDARD_HEADERS, accept: '*/*' } });
+          if (!res.ok) return { ok: false, reason: `http_${res.status}` };
+          const data = await res.json();
+          const descricao = data.descricao || null;
+          if (!descricao) return { ok: false, reason: 'no_descricao' };
+          const { error: upErr } = await supabase
+            .from('lots')
+            .update({ de_contrato: descricao })
+            .eq('id', lot.id);
+          if (upErr) return { ok: false, reason: upErr.message };
+          return { ok: true };
+        } catch (e) {
+          return { ok: false, reason: e.message.slice(0, 60) };
+        }
+      }));
+
+      for (const r of results) {
+        if (r.ok) { batchUpdated++; fetchedOk++; }
+        else if (r.reason === 'no_descricao') noDesc++;
+        else errorCount++;
+      }
+      process.stderr.write(`    chunk ${i/PARALLEL + 1}/${Math.ceil(slice.length/PARALLEL)}: +${results.filter(r => r.ok).length} ok\n`);
+    }
+
+    lastId = lots[lots.length - 1].id;
+    totalUpdated += batchUpdated;
+    totalSkipped += (noDesc + errorCount);
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    process.stderr.write(`  batch ${batchNum} (id=${lastId}): +${batchUpdated} updated (total ${totalUpdated}), ${lots.length} scanned in ${elapsed}s (no_desc=${noDesc}, errors=${errorCount})\n`);
+    if (lots.length < BATCH) break;
+    await sleep(500);
+  }
+
+  process.stderr.write(`\nDone: ${totalUpdated} descriptions fetched, ${totalSkipped} skipped/failed\n`);
 }
 
 main().catch(e => {
