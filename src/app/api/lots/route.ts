@@ -159,7 +159,7 @@ export async function GET(request: NextRequest) {
       const today = new Date().toISOString().split("T")[0];
       const { data: allAuctions } = await svc
         .from("auctions")
-        .select("id, auction_code, status, result_date");
+        .select("id, auction_code, status, result_date, bid_end_date");
       // Exclude auctions that have ended: COMPLETED status OR bid_end_date in the past.
       // User wants the "Leilões Disponíveis" view to show only lots from auctions
       // where bidding is still possible. We trust them to filter the trash themselves.
