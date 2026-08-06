@@ -130,96 +130,35 @@ export async function GET(request: NextRequest) {
     const fromIdx = (page - 1) * limit;
     const toIdx = fromIdx + limit - 1;
 
-    // For leiloes non-bid_end sorts: don't apply DB sort — we need to fetch enriched lots
-    // which may not be at the top of id DESC ordering. After filtering, we'll re-sort.
-    if (!isBidEndSort && !leiloes) {
+    // For leiloes: push ALL active-auction filtering to the database query
+    // (PostgREST foreign-key filter syntax). This is the cleanest, fastest path
+    // and works with proper range pagination + count: 'exact'.
+    if (leiloes) {
+      const today = new Date().toISOString().split("T")[0];
+      query = query
+        .is("outcome_status", null)
+        .not("valor", "is", null)
+        .eq("enrichment_status", "enriched")
+        .not("auction_id", "is", null)             // require auction link
+        .gt("auctions.bid_end_date", today)        // bid_end > today
+        .neq("auctions.status", "COMPLETED");      // not completed
+      // Apply sort at DB level too (no in-memory sort/slice needed)
+      const ascending = order === "asc";
+      query = query.order(sort === "price" ? "valor" : "id", { ascending });
+    } else if (!isBidEndSort) {
       query = query.order(dbSortCol, { ascending: order === "asc" });
     }
 
-    // Execute query — for leiloes always fetch up to 500 to allow proper filtering
-    // then slice to the requested range after filtering
-    console.error("DEBUG: before query, fromIdx=", fromIdx, "toIdx=", toIdx, "isBidEndSort=", isBidEndSort);
-    let { data: lots, error, count } = leiloes
-      ? await query.limit(5000) // leiloes: fetch more, filter, then slice
-      : isBidEndSort
+    // Execute query
+    let { data: lots, error, count } = isBidEndSort
       ? await query.limit(5000) // bid_end sort: fetch all for in-memory sort
-      : await query.range(fromIdx, toIdx); // other sorts: use range pagination
-    console.error("DEBUG: after query, lots count =", (lots || []).length, "count =", count, "leiloes=", leiloes, "isBidEndSort=", isBidEndSort);
-
+      : await query.range(fromIdx, toIdx);
     if (error) {
       console.error("Error fetching lots:", error);
       return NextResponse.json(
         { error: "Failed to fetch lots", details: error.message },
         { status: 500 }
       );
-    }
-
-    // For leiloes: filter out lots from auctions that have ended OR cities with no future bid periods
-    if (leiloes) {
-      const today = new Date().toISOString().split("T")[0];
-      const { data: allAuctions } = await svc
-        .from("auctions")
-        .select("id, auction_code, status, result_date, bid_end_date");
-      // Exclude auctions that have ended: COMPLETED status OR bid_end_date in the past.
-      // User wants the "Leilões Disponíveis" view to show only lots from auctions
-      // where bidding is still possible. We trust them to filter the trash themselves.
-      const excludeAuctionIds: number[] = [];
-      const excludeAuctionCodes: Set<string> = new Set();
-      const unknownAuctionIds: number[] = []; // UNKNOWN with null result_date
-      if (allAuctions) {
-        for (const a of allAuctions as any[]) {
-          const isEnded =
-            a.status === "COMPLETED" ||
-            (a.bid_end_date && a.bid_end_date < today);
-          if (isEnded) {
-            excludeAuctionIds.push(a.id);
-            if (a.auction_code) excludeAuctionCodes.add(a.auction_code);
-          }
-          if (a.status === "UNKNOWN" && !a.result_date) {
-            unknownAuctionIds.push(a.id);
-          }
-        }
-      }
-      // Find cities whose latest bid_period ended before today (no future bidding possible)
-      const { data: latestPeriods } = await svc
-        .from("bid_periods")
-        .select("city_id, end_date")
-        .order("end_date", { ascending: false });
-      const latestByCity: Record<number, string> = {};
-      if (latestPeriods) {
-        for (const p of latestPeriods as any[]) {
-          if (!latestByCity[p.city_id]) {
-            latestByCity[p.city_id] = p.end_date;
-          }
-        }
-      }
-      const endedCityIds = Object.entries(latestByCity)
-        .filter(([_, end_date]) => end_date < today)
-        .map(([city_id]) => parseInt(city_id));
-
-      // Filter: only exclude lots from definitively COMPLETED auctions (past result_date)
-      // OR cities with NO future bid periods that have no surviving auction link.
-      // UNKNOWN auctions with null result_date are kept if the city still has future bid periods —
-      // this handles cases where CAIXA shows active lots but our auction status is stale.
-      console.error("DEBUG filter: excludeAuctionIds.length=", excludeAuctionIds.length, "excludeAuctionCodes.size=", excludeAuctionCodes.size, "endedCityIds.length=", endedCityIds.length);
-    if (excludeAuctionIds.length > 0 || excludeAuctionCodes.size > 0 || endedCityIds.length > 0) {
-      console.error("DEBUG filter: running filter, lots count before=", (lots || []).length);
-      lots = (lots || []).filter((l: any) => {
-        // Exclude if auction is COMPLETED
-        if (l.auction_id && excludeAuctionIds.includes(l.auction_id)) {
-          return false;
-        }
-        if (l.co_leilao && excludeAuctionCodes.has(l.co_leilao)) {
-          return false;
-        }
-        // Exclude orphan lots (no auction link + city has no future bid periods)
-        if (l.city_id && endedCityIds.includes(l.city_id) && !l.auction_id) {
-          return false;
-        }
-        return true;
-      }) as any;
-      console.error("DEBUG filter: lots count after=", (lots || []).length);
-    }
     }
 
     // For vendas: also fetch lots from completed auctions awaiting results (outcome_status=null)
@@ -372,38 +311,24 @@ export async function GET(request: NextRequest) {
     // Sort by bid_end if requested (most urgent first)
     // Past bid_end (auction ended, awaiting results) goes to bottom; future dates sort normally
     if (isBidEndSort) {
-      const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD in UTC, timezone-neutral enough
+      const today = new Date().toISOString().split("T")[0];
       lotsWithSourceUrl.sort((a: any, b: any) => {
         const aEnd = a.bid_end || "9999-12-31";
         const bEnd = b.bid_end || "9999-12-31";
-        const aPast = aEnd < today; // only strictly past dates go to bottom
+        const aPast = aEnd < today;
         const bPast = bEnd < today;
-        if (aPast && !bPast) return 1;   // past → push down
-        if (!aPast && bPast) return -1; // future → bring forward
-        return aEnd.localeCompare(bEnd);  // both same status → sort ascending
+        if (aPast && !bPast) return 1;
+        if (!aPast && bPast) return -1;
+        return aEnd.localeCompare(bEnd);
       });
     }
 
-    // For leiloes non-bid_end sorts: slice to the requested range after filtering
-    // (fetched 500 but filter may reject most, so we can't use DB range pagination)
-    if (leiloes && !isBidEndSort) {
-      const ascending = order === "asc";
-      if (sort === "price") {
-        lotsWithSourceUrl.sort((a: any, b: any) => ascending
-          ? (a.valor || 0) - (b.valor || 0)
-          : (b.valor || 0) - (a.valor || 0));
-      } else {
-        lotsWithSourceUrl.sort((a: any, b: any) => ascending
-          ? a.id - b.id
-          : b.id - b.id);
-      }
-    }
+    // /leiloes: SQL filter + SQL sort + SQL pagination. count comes from Supabase.
+    // /vendas + bid_end sort: still use in-memory pagination (count via array length).
+    const isLeiloesPaginated = leiloes && !isBidEndSort;
+    const totalSorted = isLeiloesPaginated ? (count || 0) : lotsWithSourceUrl.length;
 
-    // For leiloes: total should be the actual filtered count, not the pre-filter DB count
-    // The DB count doesn't account for post-fetch auction/city exclusion filters
-    const totalSorted = leiloes ? lotsWithSourceUrl.length : (count || 0);
-
-    if (leiloes && !isBidEndSort) {
+    if (isBidEndSort) {
       lotsWithSourceUrl = lotsWithSourceUrl.slice(fromIdx, fromIdx + limit);
     }
 
