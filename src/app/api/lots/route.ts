@@ -168,9 +168,13 @@ export async function GET(request: NextRequest) {
     }
 
     // Execute query
-    let { data: lots, error, count } = isBidEndSort
+    // IMPORTANT: PostgREST's .range() is hard-capped at 1000 rows server-side.
+    // We use .limit(5000) + JS slicing since we already have count: 'exact'.
+    let { data: lots, error, count } = leiloes
+      ? await query.limit(5000) // /leiloes: fetch up to 5000, JS-slice for pagination
+      : isBidEndSort
       ? await query.limit(5000) // bid_end sort: fetch all for in-memory sort
-      : await query.range(fromIdx, toIdx);
+      : await query.range(fromIdx, toIdx); // other sorts: use range pagination
     if (error) {
       console.error("Error fetching lots:", error);
       return NextResponse.json(
