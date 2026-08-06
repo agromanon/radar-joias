@@ -2521,13 +2521,21 @@ Return ONLY this JSON structure, no other text:
 
 async function enrichLot(lot) {
   const deContrato = lot.de_contrato || '';
-  if (!deContrato.trim()) return null;
 
-  const prompt = `de_contrato: "${deContrato}"\nlot_number: ${lot.lot_number || 'N/A'}\ncontrato: ${lot.contract_number || 'N/A'}`;
+  // Build a base prompt from whatever fields are available
+  let prompt;
+  if (deContrato.trim()) {
+    prompt = `de_contrato: "${deContrato}"\nlot_number: ${lot.lot_number || 'N/A'}\ncontrato: ${lot.contract_number || 'N/A'}`;
+  } else if (lot.contract_number) {
+    // No description — use contract_number, valor, city as clues for vitrine-only lots
+    prompt = `(Sem descrição detalhada) Use these cues to make best inference:\nlot_number: ${lot.lot_number || 'N/A'}\ncontrato: ${lot.contract_number || 'N/A'}\nvalor_inicial: R$ ${lot.valor || 'N/A'}`;
+  } else {
+    return null;
+  }
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const result = await llmCall('enrich', ENRICHMENT_PROMPT, prompt, 'qwen2.5-7b-instruct');
+      const result = await llmCall('enrich', ENRICHMENT_PROMPT, prompt, 'openrouter/free');
       const content = result.content.trim();
       const jsonMatch = content.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
