@@ -530,6 +530,11 @@ export default function LeiloesPage() {
         <div className="bg-[#151A22] border border-[#272A31] rounded-2xl p-4">
           <div className="text-[#8E9297] text-xs font-bold uppercase mb-1">Total de Lotes</div>
           <div className="text-2xl font-black text-white">{Number(pagination.total).toLocaleString('pt-BR')}</div>
+          {process.env.NODE_ENV === "development" && (
+            <div className="text-[10px] text-red-400 mt-1">
+              DEBUG: total={pagination.total} lots={lots.length} pages={pagination.totalPages}
+            </div>
+          )}
         </div>
         <div className="bg-[#151A22] border border-[#272A31] rounded-2xl p-4">
           <div className="text-[#8E9297] text-xs font-bold uppercase mb-1">Menor Lance</div>
