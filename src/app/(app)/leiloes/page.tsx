@@ -2,10 +2,6 @@
 
 import Link from "next/link";
 import { useState, useEffect, useRef } from "react";
-
-// Force dynamic rendering to bypass any caching layers
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
 import { Search, SlidersHorizontal, Clock, MapPin, X, Filter, Gem, TrendingUp, AlertTriangle, Star, CheckSquare, Square, Loader2 } from "lucide-react";
 import { createClient } from "@/lib/supabase";
 import { useUser } from "@/hooks/useUser";
